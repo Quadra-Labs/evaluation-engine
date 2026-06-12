@@ -1,0 +1,11 @@
+{
+  "version": 1,
+  "skills": {
+    "sui-move": {
+      "source": "mystenlabs/skills",
+      "sourceType": "github",
+      "skillPath": "sui-move/SKILL.md",
+      "computedHash": "8cab7232c524e0c798716d87f3dd73747f502af47ebb48333334d6b3297bf8d0"
+    }
+  }
+}
