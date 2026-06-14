@@ -1,0 +1,4 @@
+# This evaluator resolves prices from Pyth Hermes, so that host must be
+# reachable. The enclave has no other outbound access.
+endpoints:
+  - hermes.pyth.network

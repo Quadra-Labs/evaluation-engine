@@ -4,12 +4,13 @@
 // exactly one scorer. The registry maps a category id to its scorer so the
 // process_data endpoint can look up the right one and reject anything else.
 
-pub mod btc_price;
+pub mod movement_pct;
+pub mod price_range;
+pub mod up_down;
 
 use crate::job::JobEnvelope;
 use fastcrypto::encoding::{Encoding, Hex};
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
-use serde_json::Value;
 use std::collections::HashMap;
 use std::fmt;
 
@@ -68,7 +69,7 @@ pub struct ScoreResult {
 #[derive(Debug)]
 pub enum ScoringError {
     BadAgentResult(String),
-    BadFinalizedResult(String),
+    BadStartData(String),
     OutOfRange(String),
 }
 
@@ -76,7 +77,7 @@ impl fmt::Display for ScoringError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             ScoringError::BadAgentResult(e) => write!(f, "could not read agent_result: {e}"),
-            ScoringError::BadFinalizedResult(e) => write!(f, "could not read finalized_result: {e}"),
+            ScoringError::BadStartData(e) => write!(f, "bad start data: {e}"),
             ScoringError::OutOfRange(e) => write!(f, "score is out of range: {e}"),
         }
     }
@@ -84,12 +85,26 @@ impl fmt::Display for ScoringError {
 
 impl std::error::Error for ScoringError {}
 
+/// Parse an agent-supplied USD price (a JSON float) into 1e-8 fixed-point units,
+/// matching the oracle's scale. A single parse+round keeps it deterministic.
+pub fn usd_to_scaled(value: f64) -> Result<u128, ScoringError> {
+    if !value.is_finite() || value < 0.0 {
+        return Err(ScoringError::BadAgentResult(format!("invalid price {value}")));
+    }
+    Ok((value * crate::oracle::PRICE_SCALE as f64).round() as u128)
+}
+
 pub trait Scorer: Send + Sync {
     fn category_id(&self) -> &str;
-    // finalized_result is the ground truth the engine resolved (for example the
-    // real price read from the oracle), shaped as JSON so each category reads
-    // whatever fields it needs.
-    fn score(&self, job: &JobEnvelope, finalized_result: &Value) -> Result<u8, ScoringError>;
+    // Score the agent's result against the asset's price at delivery (start_price)
+    // and at resolution (end_price), both in 1e-8 fixed-point units (see
+    // oracle::PRICE_SCALE). The scorer also reads lifetime from the job template.
+    fn score(
+        &self,
+        job: &JobEnvelope,
+        start_price: u128,
+        end_price: u128,
+    ) -> Result<u8, ScoringError>;
 }
 
 pub struct ScorerRegistry {

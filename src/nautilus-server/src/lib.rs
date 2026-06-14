@@ -10,25 +10,40 @@ use serde_json::json;
 use std::fmt;
 
 mod apps {
-    #[cfg(feature = "btc-price-guess")]
-    #[path = "btc-price-guess/mod.rs"]
-    pub mod btc_price_guess;
+    #[cfg(feature = "price-range-guess")]
+    #[path = "price-range-guess/mod.rs"]
+    pub mod price_range_guess;
+    #[cfg(feature = "up-down-guess")]
+    #[path = "up-down-guess/mod.rs"]
+    pub mod up_down_guess;
+    #[cfg(feature = "movement-percentage-guess")]
+    #[path = "movement-percentage-guess/mod.rs"]
+    pub mod movement_percentage_guess;
 }
 
+// The active enclave's evaluator (exactly one feature is enabled per build).
 pub mod app {
-    #[cfg(feature = "btc-price-guess")]
-    pub use crate::apps::btc_price_guess::*;
+    #[cfg(feature = "price-range-guess")]
+    pub use crate::apps::price_range_guess::*;
+    #[cfg(feature = "up-down-guess")]
+    pub use crate::apps::up_down_guess::*;
+    #[cfg(feature = "movement-percentage-guess")]
+    pub use crate::apps::movement_percentage_guess::*;
 }
 
 pub mod common;
 
-// Shared job model, scoring engine, and ground truth oracle, used by category
-// apps like btc-price-guess.
-#[cfg(feature = "btc-price-guess")]
+// Shared across every finance evaluator: the job model, scoring engine, ground
+// truth oracle, curated asset->feed map, and the HTTP handlers.
+#[cfg(feature = "finance")]
+pub mod asset;
+#[cfg(feature = "finance")]
+pub mod endpoints;
+#[cfg(feature = "finance")]
 pub mod job;
-#[cfg(feature = "btc-price-guess")]
+#[cfg(feature = "finance")]
 pub mod oracle;
-#[cfg(feature = "btc-price-guess")]
+#[cfg(feature = "finance")]
 pub mod scoring;
 
 /// App state, at minimum needs to maintain the ephemeral keypair.

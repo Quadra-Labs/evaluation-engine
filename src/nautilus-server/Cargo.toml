@@ -30,5 +30,10 @@ lazy_static = "1.4"
 uuid = { version = "1.0", features = ["v4"] }
 
 [features]
-default = ["btc-price-guess"]
-btc-price-guess = []
+default = ["price-range-guess"]
+# Shared finance machinery (job model, oracle, scoring, asset map, endpoints).
+# Each evaluator enables it; exactly one evaluator is built per enclave image.
+finance = []
+price-range-guess = ["finance"]
+up-down-guess = ["finance"]
+movement-percentage-guess = ["finance"]

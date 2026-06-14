@@ -22,6 +22,14 @@ pub struct JobEnvelope {
     pub job_template: JobTemplate,
     pub started_at_ms: u64,
     pub delivered_at_ms: u64,
+    // The asset the job targets (e.g. "BTC"); the scorer resolves its price feed.
+    // Absent for plain validation requests, so it defaults to empty.
+    #[serde(default)]
+    pub asset: String,
+    // The start data snapshotted at delivery (e.g. { "start_price": <1e-8 units> }).
+    // Absent for validation requests; present for scoring (process_data).
+    #[serde(default)]
+    pub start_data: Value,
 }
 
 // To work out the moment a job should be resolved against: the agent commits at
@@ -202,6 +210,8 @@ mod test {
             },
             started_at_ms: 1_700_000_000_000,
             delivered_at_ms: 1_700_000_060_000,
+            asset: "BTC".to_string(),
+            start_data: json!({ "start_price": 6_000_000_000_000u64 }),
         }
     }
 

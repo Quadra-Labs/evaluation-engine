@@ -10,9 +10,11 @@ use tracing::info;
 
 pub const PYTH_HERMES_HOST: &str = "hermes.pyth.network";
 
-// Pyth price feed id for BTC/USD (no 0x prefix, the way Hermes returns it).
-pub const BTC_USD_FEED_ID: &str =
-    "e62df6c8b4a85fe1a67db44dc12de5db330f7ac66b72dc658afedf0f4a415b43";
+// Fixed-point scale for prices: every price is returned as an integer in 1e-8
+// units (so $1.00 -> 100_000_000). This keeps precision for cheap assets and
+// lets ratio/percentage scoring stay integer-only (no float drift in the
+// reproducible build). 1e8 matches Pyth's common exponent.
+pub const PRICE_SCALE: u128 = 100_000_000;
 
 #[derive(Debug)]
 pub enum OracleError {
@@ -57,8 +59,15 @@ struct PythPrice {
     publish_time: i64,
 }
 
-// To read the USD price in whole dollars for a feed at a unix seconds timestamp.
-pub async fn fetch_price_usd(feed_id: &str, at_unix_seconds: u64) -> Result<u64, OracleError> {
+// To read a feed's price at a unix-seconds timestamp as a fixed-point integer in
+// 1e-8 units (see PRICE_SCALE). Ratio/percentage scoring then stays integer-only.
+pub async fn fetch_price_scaled(feed_id: &str, at_unix_seconds: u64) -> Result<u128, OracleError> {
+    let (raw, expo) = fetch_raw(feed_id, at_unix_seconds).await?;
+    normalize_to_scaled(raw, expo)
+}
+
+// The raw Pyth integer price plus its exponent for a feed at a timestamp.
+async fn fetch_raw(feed_id: &str, at_unix_seconds: u64) -> Result<(i128, i32), OracleError> {
     let url = format!("https://{PYTH_HERMES_HOST}/v2/updates/price/{at_unix_seconds}");
     info!("asking pyth for feed {} at unix second {}", feed_id, at_unix_seconds);
 
@@ -104,29 +113,34 @@ pub async fn fetch_price_usd(feed_id: &str, at_unix_seconds: u64) -> Result<u64,
         wanted, raw, feed.price.expo, feed.price.publish_time
     );
 
-    normalize_to_usd(raw, feed.price.expo)
+    Ok((raw, feed.price.expo))
 }
 
-// To turn Pyth's integer price plus exponent into whole US dollars, rounded to
-// the nearest dollar. Pyth reports price * 10^expo as the real value, with expo
-// usually negative (for example expo -8 means the integer is in 1e-8 units).
-pub fn normalize_to_usd(price: i128, expo: i32) -> Result<u64, OracleError> {
+// To turn Pyth's integer price plus exponent into 1e-8 fixed-point units. The
+// real value is price * 10^expo; scaled = price * 10^(expo + 8).
+pub fn normalize_to_scaled(price: i128, expo: i32) -> Result<u128, OracleError> {
     if price <= 0 {
         return Err(OracleError::NonPositivePrice(price));
     }
 
-    let dollars: i128 = if expo < 0 {
-        let scale = 10i128
-            .checked_pow((-expo) as u32)
-            .ok_or(OracleError::OutOfRange)?;
-        // Add half the scale before dividing so we round to the nearest dollar.
-        (price + scale / 2) / scale
+    let shift = expo + 8;
+    let scaled: i128 = if shift >= 0 {
+        let mul = 10i128.checked_pow(shift as u32).ok_or(OracleError::OutOfRange)?;
+        price.checked_mul(mul).ok_or(OracleError::OutOfRange)?
     } else {
-        let scale = 10i128.checked_pow(expo as u32).ok_or(OracleError::OutOfRange)?;
-        price.checked_mul(scale).ok_or(OracleError::OutOfRange)?
+        let div = 10i128.checked_pow((-shift) as u32).ok_or(OracleError::OutOfRange)?;
+        // Round to the nearest 1e-8 unit.
+        (price + div / 2) / div
     };
 
-    u64::try_from(dollars).map_err(|_| OracleError::OutOfRange)
+    u128::try_from(scaled).map_err(|_| OracleError::OutOfRange)
+}
+
+// To turn a 1e-8 fixed-point price into whole US dollars (informational only,
+// for the signed `finalized_price`). Saturates rather than failing.
+pub fn scaled_to_usd(scaled: u128) -> u64 {
+    let usd = (scaled + PRICE_SCALE / 2) / PRICE_SCALE;
+    u64::try_from(usd).unwrap_or(u64::MAX)
 }
 
 #[cfg(test)]
@@ -135,26 +149,33 @@ mod test {
 
     #[test]
     fn normalizes_typical_btc_price() {
-        // 60203.45 USD as Pyth would send it with expo -8.
-        assert_eq!(normalize_to_usd(6_020_345_000_000, -8).unwrap(), 60203);
+        // 60203.45 USD as Pyth sends it with expo -8 -> already in 1e-8 units.
+        assert_eq!(normalize_to_scaled(6_020_345_000_000, -8).unwrap(), 6_020_345_000_000);
     }
 
     #[test]
-    fn rounds_to_nearest_dollar() {
-        // 60203.50 rounds up to 60204 with expo -2.
-        assert_eq!(normalize_to_usd(6_020_350, -2).unwrap(), 60204);
-        // 60203.49 rounds down to 60203 with expo -2.
-        assert_eq!(normalize_to_usd(6_020_349, -2).unwrap(), 60203);
+    fn scales_other_exponents_to_1e8() {
+        // expo -2 means the integer is in cents; 6_020_345 * 10^(−2+8) = ...e8 units.
+        assert_eq!(normalize_to_scaled(6_020_345, -2).unwrap(), 6_020_345_000_000);
+        // expo 0: 3 -> 3 * 1e8.
+        assert_eq!(normalize_to_scaled(3, 0).unwrap(), 300_000_000);
     }
 
     #[test]
-    fn handles_positive_exponent() {
-        assert_eq!(normalize_to_usd(6, 4).unwrap(), 60000);
+    fn keeps_sub_dollar_precision() {
+        // $0.0000012 at expo -8 (raw 120) stays 120 in 1e-8 units, not rounded to 0.
+        assert_eq!(normalize_to_scaled(120, -8).unwrap(), 120);
+    }
+
+    #[test]
+    fn scaled_to_usd_rounds() {
+        assert_eq!(scaled_to_usd(6_020_345_000_000), 60203); // 60203.45 -> 60203
+        assert_eq!(scaled_to_usd(6_020_350_000_000), 60204); // 60203.50 -> 60204
     }
 
     #[test]
     fn rejects_non_positive_price() {
-        assert!(matches!(normalize_to_usd(0, -8), Err(OracleError::NonPositivePrice(_))));
-        assert!(matches!(normalize_to_usd(-5, -8), Err(OracleError::NonPositivePrice(_))));
+        assert!(matches!(normalize_to_scaled(0, -8), Err(OracleError::NonPositivePrice(_))));
+        assert!(matches!(normalize_to_scaled(-5, -8), Err(OracleError::NonPositivePrice(_))));
     }
 }
