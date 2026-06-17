@@ -1,0 +1,4 @@
+# The portfolio-roi engine resolves real start/end prices itself from Pyth Hermes,
+# so that host must be reachable. The enclave has no other outbound access.
+endpoints:
+  - hermes.pyth.network
