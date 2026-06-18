@@ -19,6 +19,12 @@ mod apps {
     #[cfg(feature = "movement-percentage-guess")]
     #[path = "movement-percentage-guess/mod.rs"]
     pub mod movement_percentage_guess;
+    #[cfg(feature = "portfolio-roi")]
+    #[path = "portfolio-roi/mod.rs"]
+    pub mod portfolio_roi;
+    #[cfg(feature = "polymarket")]
+    #[path = "polymarket/mod.rs"]
+    pub mod polymarket;
 }
 
 // The active enclave's evaluator (exactly one feature is enabled per build).
@@ -29,20 +35,28 @@ pub mod app {
     pub use crate::apps::up_down_guess::*;
     #[cfg(feature = "movement-percentage-guess")]
     pub use crate::apps::movement_percentage_guess::*;
+    #[cfg(feature = "portfolio-roi")]
+    pub use crate::apps::portfolio_roi::*;
+    #[cfg(feature = "polymarket")]
+    pub use crate::apps::polymarket::*;
 }
 
 pub mod common;
 
-// Shared across every finance evaluator: the job model, scoring engine, ground
-// truth oracle, curated asset->feed map, and the HTTP handlers.
-#[cfg(feature = "finance")]
+// Low-level modules shared by the finance evaluators AND the portfolio-roi enclave: the job
+// model, ground truth oracle, and curated asset->feed map. The polymarket enclave reuses the job
+// model only (it has its own Polymarket client, not the Pyth oracle / asset map).
+#[cfg(any(feature = "finance", feature = "portfolio-roi"))]
 pub mod asset;
+#[cfg(any(feature = "finance", feature = "portfolio-roi", feature = "polymarket"))]
+pub mod job;
+#[cfg(any(feature = "finance", feature = "portfolio-roi"))]
+pub mod oracle;
+
+// The u8-score machinery (scoring registry + shared HTTP handlers) is finance-only. portfolio-roi
+// returns a signed ROI metric instead and provides its own handlers (apps/portfolio-roi).
 #[cfg(feature = "finance")]
 pub mod endpoints;
-#[cfg(feature = "finance")]
-pub mod job;
-#[cfg(feature = "finance")]
-pub mod oracle;
 #[cfg(feature = "finance")]
 pub mod scoring;
 

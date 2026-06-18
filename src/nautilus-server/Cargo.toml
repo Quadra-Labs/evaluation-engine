@@ -37,3 +37,11 @@ finance = []
 price-range-guess = ["finance"]
 up-down-guess = ["finance"]
 movement-percentage-guess = ["finance"]
+# Competition trading/performance enclave: returns a SIGNED ROI metric (u64), not a u8 score,
+# so it uses its own handlers (not the shared scoring/endpoints) while reusing the low-level
+# job/asset/oracle modules. Build with: --no-default-features --features portfolio-roi.
+portfolio-roi = []
+# Polymarket prediction-market enclave: serves the three polymarket-* categories (resolution,
+# event, price) with a u8 score via its own handlers + Polymarket client (no Pyth oracle / asset
+# map). Build with: --no-default-features --features polymarket.
+polymarket = []

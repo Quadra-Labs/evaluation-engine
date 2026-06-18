@@ -1,0 +1,5 @@
+# The polymarket engine reads market resolution + historical prices itself from Polymarket's
+# public Gamma and CLOB APIs, so those two hosts must be reachable. No other outbound access.
+endpoints:
+  - gamma-api.polymarket.com
+  - clob.polymarket.com
