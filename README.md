@@ -145,6 +145,20 @@ my-evaluator = ["finance"]
 4. Make sure every asset the evaluator needs is in `src/asset.rs` (symbol → Pyth
    feed id). The shared oracle resolves prices; the scorer only does the math.
 
+5. Register the enclave's HTTP URL in the Walrus `eval_engines` catalog (from the
+   `data/` package, after the gateway is running):
+
+```bash
+cd ../data
+EVALUATOR_ID=my-evaluator \
+ENCLAVE_URL=http://host:port \
+ENCLAVE_OBJECT_ID=0x... \   # optional in local dev
+npm run register-eval-engine
+```
+
+Do **not** add the URL to `.env` — the scheduler and competition engine load the
+catalog dynamically and refresh when the pointer advances.
+
 ## Build, run, test
 
 Local development (runs anywhere, no AWS, fresh key per boot). Pick one evaluator:
