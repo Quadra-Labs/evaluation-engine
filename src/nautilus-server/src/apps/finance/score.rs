@@ -1,51 +1,30 @@
-// Shared HTTP handlers for every finance evaluator enclave. Each enclave is built
-// for exactly one evaluator (one Cargo feature) which fixes `app::CATEGORY_ID` and
-// `app::build_registry`; these handlers are otherwise identical:
+// The u8-score pipeline for the finance engine's three "guess" categories (price-range,
+// up-down, movement-percentage). Moved out of the old top-level endpoints.rs and split into
+// inner functions (no axum wrappers) so the finance dispatcher (mod.rs) can call them after it
+// has picked this branch by category_id. Each scorer lives in crate::scoring; the merged
+// registry (super::build_registry) holds all three, and the job's own category_id selects one.
 //
-//   POST /validate     input checks only (category, timeliness, output schema) -> {valid}
-//   POST /start_data   the asset's price "at_ms" (delivery) -> {start_data:{start_price}}
-//   POST /process_data full pipeline at resolution: resolve end price, score against
-//                      the delivered start_price, sign the score.
+//   validate    input checks only (category in the score set, timeliness, output schema)
+//   start_data  the asset's price at the delivery moment -> { start_price }
+//   process     resolve the end price, score against the delivered start price, sign (Score=0)
 
-use crate::app::{build_registry, IntentScope, CATEGORY_ID};
+use super::{build_registry, IntentScope, SCORE_CATEGORIES};
 use crate::asset;
-use crate::common::{to_signed_response, IntentMessage, ProcessDataRequest, ProcessedDataResponse};
+use crate::common::{to_signed_response, IntentMessage, ProcessedDataResponse};
 use crate::job::{self, JobEnvelope};
 use crate::oracle;
 use crate::scoring::{ScoreResult, SuiAddress};
-use crate::AppState;
 use crate::EnclaveError;
-use axum::extract::State;
-use axum::Json;
+use fastcrypto::ed25519::Ed25519KeyPair;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
-use std::sync::Arc;
 use tracing::{info, warn};
-
-// --- /validate -------------------------------------------------------------
 
 #[derive(Serialize)]
 pub struct ValidateResponse {
     pub valid: bool,
     pub job_id: String,
 }
-
-// Input validation only (no oracle, no scoring). The scheduler's validator engine
-// calls this so the intake engine can release payment before scoring.
-pub async fn validate_input(
-    Json(request): Json<ProcessDataRequest<JobEnvelope>>,
-) -> Result<Json<ValidateResponse>, EnclaveError> {
-    let job = request.payload;
-    info!("validating job '{}' for agent '{}'", job.job_id, job.agent_id);
-
-    job::ensure_category(&job, CATEGORY_ID).map_err(to_enclave_error)?;
-    job::ensure_timely(&job).map_err(to_enclave_error)?;
-    job::validate_output_schema(&job).map_err(to_enclave_error)?;
-
-    Ok(Json(ValidateResponse { valid: true, job_id: job.job_id }))
-}
-
-// --- /start_data -----------------------------------------------------------
 
 #[derive(Debug, Deserialize)]
 pub struct StartDataRequest {
@@ -60,29 +39,35 @@ pub struct StartDataResponse {
     pub start_data: Value,
 }
 
-pub async fn start_data(
-    Json(request): Json<ProcessDataRequest<StartDataRequest>>,
-) -> Result<Json<StartDataResponse>, EnclaveError> {
-    let req = request.payload;
+// Input validation only (no oracle, no scoring). The job's category must be one of the score
+// categories this engine serves; the matching scorer is selected later by category_id.
+pub async fn validate(job: JobEnvelope) -> Result<ValidateResponse, EnclaveError> {
+    info!("validating job '{}' for agent '{}'", job.job_id, job.agent_id);
+    job::ensure_category_in(&job, SCORE_CATEGORIES).map_err(to_enclave_error)?;
+    job::ensure_timely(&job).map_err(to_enclave_error)?;
+    job::validate_output_schema(&job).map_err(to_enclave_error)?;
+    Ok(ValidateResponse { valid: true, job_id: job.job_id })
+}
+
+pub async fn start_data(req: StartDataRequest) -> Result<StartDataResponse, EnclaveError> {
     let feed = asset::feed_id(&req.asset)
         .ok_or_else(|| EnclaveError::GenericError(format!("unsupported asset '{}'", req.asset)))?;
     let price = oracle::fetch_price_scaled(feed, req.at_ms / 1000)
         .await
         .map_err(|e| EnclaveError::GenericError(format!("oracle fetch failed: {e}")))?;
     info!("start price for {} at {}ms is {} (1e-8 units)", req.asset, req.at_ms, price);
-    Ok(Json(StartDataResponse { start_data: serde_json::json!({ "start_price": price }) }))
+    Ok(StartDataResponse { start_data: serde_json::json!({ "start_price": price }) })
 }
 
-// --- /process_data ---------------------------------------------------------
-
-pub async fn process_data(
-    State(state): State<Arc<AppState>>,
-    Json(request): Json<ProcessDataRequest<JobEnvelope>>,
-) -> Result<Json<ProcessedDataResponse<IntentMessage<ScoreResult>>>, EnclaveError> {
-    let job = request.payload;
+// Full scoring pipeline at resolution: resolve the end price, score against the delivered start
+// price, and sign the score (IntentScope::Score). Signs with the passed ephemeral keypair.
+pub async fn process(
+    kp: &Ed25519KeyPair,
+    job: JobEnvelope,
+) -> Result<ProcessedDataResponse<IntentMessage<ScoreResult>>, EnclaveError> {
     info!("scoring job '{}' (asset {}) in '{}'", job.job_id, job.asset, job.category_id);
 
-    job::ensure_category(&job, CATEGORY_ID).map_err(to_enclave_error)?;
+    job::ensure_category_in(&job, SCORE_CATEGORIES).map_err(to_enclave_error)?;
     job::ensure_timely(&job).map_err(to_enclave_error)?;
     job::validate_output_schema(&job).map_err(to_enclave_error)?;
 
@@ -122,7 +107,7 @@ pub async fn process_data(
         finalized_price: oracle::scaled_to_usd(end_price),
     };
 
-    Ok(Json(to_signed_response(&state.eph_kp, result, timestamp_ms, IntentScope::Score as u8)))
+    Ok(to_signed_response(kp, result, timestamp_ms, IntentScope::Score as u8))
 }
 
 // The delivered start price, read from the job envelope's start_data (1e-8 units).

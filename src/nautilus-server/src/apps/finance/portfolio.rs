@@ -1,40 +1,21 @@
-// Quadra portfolio-roi evaluation enclave.
-//
-// One enclave serves the trading/performance category. An agent is given a starting portfolio
-// (USD per asset) and submits rebalancing trades; after the window we price the resulting
-// allocation against real Pyth prices and return a SIGNED ROI metric (PERF_BASE + roi_bps,
-// floored at 0), which the competition engine records on-chain (record_performance) and the
-// contract ranks. Unlike the finance "guess" evaluators this returns a u64 metric, not a u8
-// score, so it has its own handlers (it does NOT use the shared scoring registry / endpoints.rs)
-// while reusing the shared job/asset/oracle modules. main.rs routes here under
-// `--features portfolio-roi`.
+// The u64-metric pipeline for the finance engine's portfolio-roi category. Moved out of the old
+// apps/portfolio-roi/mod.rs and split into inner functions so the finance dispatcher (mod.rs)
+// can call them after picking this branch by category_id. Returns a SIGNED ROI metric
+// (PERF_BASE + roi_bps, floored at 0) under a DISTINCT intent scope (Metric=1) so a metric
+// signature can never be replayed as a score. Reuses the shared job/asset/oracle modules and the
+// portfolio math in roi.rs; it does NOT use the scoring registry or /start_data.
 
-mod roi;
-
+use super::roi::{compute_metric, Trade};
+use super::{IntentScope, CAT_PORTFOLIO};
 use crate::asset;
-use crate::common::{to_signed_response, IntentMessage, ProcessDataRequest, ProcessedDataResponse};
+use crate::common::{to_signed_response, IntentMessage, ProcessedDataResponse};
 use crate::job::{self, JobEnvelope};
 use crate::oracle;
-use crate::AppState;
 use crate::EnclaveError;
-use axum::extract::State;
-use axum::Json;
-use roi::{compute_metric, Trade};
+use fastcrypto::ed25519::Ed25519KeyPair;
 use serde::{Deserialize, Serialize};
-use serde_repr::{Deserialize_repr, Serialize_repr};
 use std::collections::{BTreeMap, BTreeSet};
-use std::sync::Arc;
 use tracing::{info, warn};
-
-pub const CATEGORY_ID: &str = "portfolio-roi";
-
-// Distinct intent scope from the score evaluators (Score = 0) so a metric signature can never be
-// replayed as a score, or vice versa.
-#[derive(Serialize_repr, Deserialize_repr, Debug)]
-#[repr(u8)]
-pub enum IntentScope {
-    Metric = 1,
-}
 
 // The [start, end] window the result is priced against (epoch ms).
 #[derive(Debug, Deserialize)]
@@ -74,26 +55,22 @@ pub struct ValidateResponse {
 }
 
 // Input validation only (right category, on time, promised output shape, parseable trades).
-pub async fn validate_input(
-    Json(request): Json<ProcessDataRequest<PortfolioJob>>,
-) -> Result<Json<ValidateResponse>, EnclaveError> {
-    let pjob = request.payload;
-    job::ensure_category(&pjob.job, CATEGORY_ID).map_err(to_enclave_error)?;
+pub async fn validate(pjob: PortfolioJob) -> Result<ValidateResponse, EnclaveError> {
+    job::ensure_category(&pjob.job, CAT_PORTFOLIO).map_err(to_enclave_error)?;
     job::ensure_timely(&pjob.job).map_err(to_enclave_error)?;
     job::validate_output_schema(&pjob.job).map_err(to_enclave_error)?;
     let _ = parse_trades(&pjob.job)?;
-    Ok(Json(ValidateResponse { valid: true, job_id: pjob.job.job_id }))
+    Ok(ValidateResponse { valid: true, job_id: pjob.job.job_id })
 }
 
-pub async fn process_data(
-    State(state): State<Arc<AppState>>,
-    Json(request): Json<ProcessDataRequest<PortfolioJob>>,
-) -> Result<Json<ProcessedDataResponse<IntentMessage<MetricResult>>>, EnclaveError> {
-    let pjob = request.payload;
+pub async fn process(
+    kp: &Ed25519KeyPair,
+    pjob: PortfolioJob,
+) -> Result<ProcessedDataResponse<IntentMessage<MetricResult>>, EnclaveError> {
     let job = &pjob.job;
     info!("portfolio job '{}' for agent '{}'", job.job_id, job.agent_id);
 
-    job::ensure_category(job, CATEGORY_ID).map_err(to_enclave_error)?;
+    job::ensure_category(job, CAT_PORTFOLIO).map_err(to_enclave_error)?;
     job::ensure_timely(job).map_err(to_enclave_error)?;
     job::validate_output_schema(job).map_err(to_enclave_error)?;
 
@@ -147,12 +124,7 @@ pub async fn process_data(
         metric,
     };
 
-    Ok(Json(to_signed_response(
-        &state.eph_kp,
-        result,
-        timestamp_ms,
-        IntentScope::Metric as u8,
-    )))
+    Ok(to_signed_response(kp, result, timestamp_ms, IntentScope::Metric as u8))
 }
 
 // To pull the agent's trades out of agent_result.trades (a JSON-encoded array string, since the

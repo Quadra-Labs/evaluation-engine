@@ -1,0 +1,7 @@
+# The prediction engine (the polymarket-* categories) reads market resolution + historical
+# prices from Polymarket's public Gamma and CLOB APIs, so those two hosts must be reachable.
+# Its Rust code lives in apps/polymarket/ (gated by the `prediction` feature); this file is the
+# build/runtime allowlist keyed by the engine/ENCLAVE_APP name.
+endpoints:
+  - gamma-api.polymarket.com
+  - clob.polymarket.com

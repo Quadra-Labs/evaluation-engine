@@ -101,6 +101,18 @@ pub fn ensure_category(job: &JobEnvelope, expected: &str) -> Result<(), JobError
     Ok(())
 }
 
+// To make sure a multi-category enclave (the finance engine serves several score categories) only
+// scores categories in its allowed set; a job for a category it does not serve is rejected.
+pub fn ensure_category_in(job: &JobEnvelope, allowed: &[&str]) -> Result<(), JobError> {
+    if allowed.contains(&job.category_id.as_str()) {
+        return Ok(());
+    }
+    Err(JobError::WrongCategory {
+        expected: allowed.join(" | "),
+        got: job.category_id.clone(),
+    })
+}
+
 // To reject deliveries that arrived after the job lifetime ran out.
 pub fn ensure_timely(job: &JobEnvelope) -> Result<(), JobError> {
     if job.delivered_at_ms < job.started_at_ms {
@@ -236,6 +248,14 @@ mod test {
         let job = sample_job();
         assert!(ensure_category(&job, "btc-price-guess").is_ok());
         assert!(ensure_category(&job, "weather").is_err());
+    }
+
+    #[test]
+    fn category_set_guard_accepts_members_and_rejects_others() {
+        let job = sample_job(); // category_id = "btc-price-guess"
+        assert!(ensure_category_in(&job, &["price-range-guess", "btc-price-guess"]).is_ok());
+        assert!(ensure_category_in(&job, &["price-range-guess", "up-down-guess"]).is_err());
+        assert!(ensure_category_in(&job, &[]).is_err());
     }
 
     #[test]

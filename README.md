@@ -161,22 +161,36 @@ catalog dynamically and refresh when the pointer advances.
 
 ## Build, run, test
 
-Local development (runs anywhere, no AWS, fresh key per boot). Pick one evaluator:
+There are exactly TWO engine builds, each serving every category in its class:
+
+- `finance` — the three u8-score "guess" categories (`price-range-guess`,
+  `up-down-guess`, `movement-percentage-guess`) via the shared scoring registry,
+  AND the u64-metric `portfolio-roi`. `/process_data` + `/validate` dispatch by
+  `category_id`; only this engine has the delivery-price `/start_data` step.
+- `prediction` — the three `polymarket-*` categories (`polymarket-resolution`,
+  `polymarket-event`, `polymarket-price`); its Rust code lives in `apps/polymarket/`.
+
+Local development (runs anywhere, no AWS, fresh key per boot). Pick one engine:
 
 ```bash
 cd src/nautilus-server
-RUST_LOG=info cargo run --no-default-features --features price-range-guess
-cargo test --no-default-features --features price-range-guess   # (or up-down-guess / movement-percentage-guess)
+# finance on :3000 (default), prediction on :3001
+RUST_LOG=info cargo run --no-default-features --features finance
+PORT=3001 RUST_LOG=info cargo run --no-default-features --features prediction
+cargo test --no-default-features --features finance        # (or prediction)
 ```
 
 Enclave image and PCRs (needs an AWS Nitro capable host):
 
 ```bash
-make ENCLAVE_APP=price-range-guess
-cat out/nitro.pcrs   # PCR0/1/2 are unique to this evaluator build
-make run-debug       # debug build, all-zero PCRs, for development only
+make ENCLAVE_APP=finance      # or: make ENCLAVE_APP=prediction
+cat out/nitro.pcrs            # PCR0/1/2 are unique to this engine build
+make run-debug                # debug build, all-zero PCRs, for development only
 ```
 
-Because the scorer and its allow list are compiled into the image, each
-evaluator produces its own PCR set. Register those PCRs and the enclave public
-key onchain per evaluator when the Move verifier lands.
+Because the scorers and the allow list are compiled into the image, each engine
+produces its own PCR set. Register those PCRs and the enclave public key onchain
+per ENGINE. The scheduler/competition route each `template.evaluator_id` to its
+engine URL via the eval-engines registry (all finance evaluator ids -> the
+finance engine, all `polymarket-*` -> the prediction engine), and each engine
+rejects categories outside its set as a backstop.

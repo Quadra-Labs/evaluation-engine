@@ -30,18 +30,14 @@ lazy_static = "1.4"
 uuid = { version = "1.0", features = ["v4"] }
 
 [features]
-default = ["price-range-guess"]
-# Shared finance machinery (job model, oracle, scoring, asset map, endpoints).
-# Each evaluator enables it; exactly one evaluator is built per enclave image.
+default = ["finance"]
+# FINANCE engine: ONE binary serving every finance-class category — the three u8-score "guess"
+# categories (price-range-guess, up-down-guess, movement-percentage-guess) via the shared scoring
+# registry + endpoints, AND the u64-metric portfolio-roi via its own pipeline. Compiles the job
+# model, Pyth oracle, asset map, scoring, and the portfolio math. The /process_data + /validate
+# handlers dispatch by category_id. Build with: --no-default-features --features finance.
 finance = []
-price-range-guess = ["finance"]
-up-down-guess = ["finance"]
-movement-percentage-guess = ["finance"]
-# Competition trading/performance enclave: returns a SIGNED ROI metric (u64), not a u8 score,
-# so it uses its own handlers (not the shared scoring/endpoints) while reusing the low-level
-# job/asset/oracle modules. Build with: --no-default-features --features portfolio-roi.
-portfolio-roi = []
-# Polymarket prediction-market enclave: serves the three polymarket-* categories (resolution,
-# event, price) with a u8 score via its own handlers + Polymarket client (no Pyth oracle / asset
-# map). Build with: --no-default-features --features polymarket.
-polymarket = []
+# PREDICTION engine: the three polymarket-* categories (resolution, event, price) with a u8 score
+# via the Polymarket client (no Pyth oracle / asset map). Already dispatches by category_id. Its
+# Rust code lives in apps/polymarket/ (gated by this feature). Build: --no-default-features --features prediction.
+prediction = []
