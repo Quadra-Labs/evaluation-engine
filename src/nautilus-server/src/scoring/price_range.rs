@@ -53,7 +53,9 @@ impl Scorer for PriceRangeScorer {
             ));
         }
         if start_price == 0 {
-            return Err(ScoringError::BadStartData("start_price is zero".to_string()));
+            return Err(ScoringError::BadStartData(
+                "start_price is zero".to_string(),
+            ));
         }
 
         let lifetime_ms = job::parse_lifetime_ms(&job.job_template.lifetime)
@@ -106,7 +108,10 @@ mod test {
 
     #[test]
     fn end_inside_band_is_perfect() {
-        assert_eq!(score_range(START - 100, START + 100, START, START, DAY_MS), 100);
+        assert_eq!(
+            score_range(START - 100, START + 100, START, START, DAY_MS),
+            100
+        );
     }
 
     #[test]
@@ -120,7 +125,10 @@ mod test {
     #[test]
     fn miss_beyond_tolerance_is_zero() {
         // 50% away is way past the ~3% one-day tolerance.
-        assert_eq!(score_range(START - 100, START + 100, START, START * 3 / 2, DAY_MS), 0);
+        assert_eq!(
+            score_range(START - 100, START + 100, START, START * 3 / 2, DAY_MS),
+            0
+        );
     }
 
     #[test]

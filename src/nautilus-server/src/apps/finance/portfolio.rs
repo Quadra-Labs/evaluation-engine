@@ -60,7 +60,10 @@ pub async fn validate(pjob: PortfolioJob) -> Result<ValidateResponse, EnclaveErr
     job::ensure_timely(&pjob.job).map_err(to_enclave_error)?;
     job::validate_output_schema(&pjob.job).map_err(to_enclave_error)?;
     let _ = parse_trades(&pjob.job)?;
-    Ok(ValidateResponse { valid: true, job_id: pjob.job.job_id })
+    Ok(ValidateResponse {
+        valid: true,
+        job_id: pjob.job.job_id,
+    })
 }
 
 pub async fn process(
@@ -68,7 +71,10 @@ pub async fn process(
     pjob: PortfolioJob,
 ) -> Result<ProcessedDataResponse<IntentMessage<MetricResult>>, EnclaveError> {
     let job = &pjob.job;
-    info!("portfolio job '{}' for agent '{}'", job.job_id, job.agent_id);
+    info!(
+        "portfolio job '{}' for agent '{}'",
+        job.job_id, job.agent_id
+    );
 
     job::ensure_category(job, CAT_PORTFOLIO).map_err(to_enclave_error)?;
     job::ensure_timely(job).map_err(to_enclave_error)?;
@@ -98,10 +104,13 @@ pub async fn process(
     let mut end_prices: BTreeMap<String, u128> = BTreeMap::new();
     for sym in &assets {
         if !pjob.allowed_assets.is_empty() && !pjob.allowed_assets.iter().any(|a| a == sym) {
-            return Err(EnclaveError::GenericError(format!("unknown asset '{sym}' (not allowed)")));
+            return Err(EnclaveError::GenericError(format!(
+                "unknown asset '{sym}' (not allowed)"
+            )));
         }
-        let feed = asset::feed_id(sym)
-            .ok_or_else(|| EnclaveError::GenericError(format!("unknown asset '{sym}' (no price feed)")))?;
+        let feed = asset::feed_id(sym).ok_or_else(|| {
+            EnclaveError::GenericError(format!("unknown asset '{sym}' (no price feed)"))
+        })?;
         let sp = oracle::fetch_price_scaled(feed, pjob.window.start_ms / 1000)
             .await
             .map_err(|e| EnclaveError::GenericError(format!("oracle fetch failed: {e}")))?;
@@ -112,9 +121,13 @@ pub async fn process(
         end_prices.insert(sym.clone(), ep);
     }
 
-    let (roi_bps, metric) = compute_metric(&pjob.portfolio_start, &trades, &start_prices, &end_prices)
-        .map_err(|e| EnclaveError::GenericError(e.to_string()))?;
-    info!("portfolio job '{}' roi {} bps -> metric {}", job.job_id, roi_bps, metric);
+    let (roi_bps, metric) =
+        compute_metric(&pjob.portfolio_start, &trades, &start_prices, &end_prices)
+            .map_err(|e| EnclaveError::GenericError(e.to_string()))?;
+    info!(
+        "portfolio job '{}' roi {} bps -> metric {}",
+        job.job_id, roi_bps, metric
+    );
 
     let agent_id = job::parse_sui_address(&job.agent_id).map_err(to_enclave_error)?;
     let result = MetricResult {
@@ -124,7 +137,12 @@ pub async fn process(
         metric,
     };
 
-    Ok(to_signed_response(kp, result, timestamp_ms, IntentScope::Metric as u8))
+    Ok(to_signed_response(
+        kp,
+        result,
+        timestamp_ms,
+        IntentScope::Metric as u8,
+    ))
 }
 
 // To pull the agent's trades out of agent_result.trades (a JSON-encoded array string, since the
@@ -134,10 +152,14 @@ fn parse_trades(job: &JobEnvelope) -> Result<Vec<Trade>, EnclaveError> {
         .agent_result
         .get("trades")
         .and_then(|v| v.as_str())
-        .ok_or_else(|| EnclaveError::GenericError("agent_result 'trades' is missing field".to_string()))?;
+        .ok_or_else(|| {
+            EnclaveError::GenericError("agent_result 'trades' is missing field".to_string())
+        })?;
     serde_json::from_str::<Vec<Trade>>(raw).map_err(|e| {
         warn!("bad trades for job '{}': {}", job.job_id, e);
-        EnclaveError::GenericError(format!("agent_result 'trades' is not of type JSON array: {e}"))
+        EnclaveError::GenericError(format!(
+            "agent_result 'trades' is not of type JSON array: {e}"
+        ))
     })
 }
 

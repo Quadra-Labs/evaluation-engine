@@ -41,15 +41,18 @@ impl Scorer for MovementPctScorer {
         let guess: AgentGuess = serde_json::from_value(job.agent_result.clone())
             .map_err(|e| ScoringError::BadAgentResult(e.to_string()))?;
         if !guess.percentage.is_finite() {
-            return Err(ScoringError::BadAgentResult("percentage is not a number".to_string()));
+            return Err(ScoringError::BadAgentResult(
+                "percentage is not a number".to_string(),
+            ));
         }
         if start_price == 0 {
-            return Err(ScoringError::BadStartData("start_price is zero".to_string()));
+            return Err(ScoringError::BadStartData(
+                "start_price is zero".to_string(),
+            ));
         }
 
         let guess_bps = (guess.percentage * 100.0).round() as i128;
-        let actual_bps =
-            (end_price as i128 - start_price as i128) * 10_000 / start_price as i128;
+        let actual_bps = (end_price as i128 - start_price as i128) * 10_000 / start_price as i128;
 
         info!(
             "movement score: guess {}bps, actual {}bps (start {}, end {})",

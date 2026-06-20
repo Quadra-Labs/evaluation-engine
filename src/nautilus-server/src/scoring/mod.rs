@@ -89,7 +89,9 @@ impl std::error::Error for ScoringError {}
 /// matching the oracle's scale. A single parse+round keeps it deterministic.
 pub fn usd_to_scaled(value: f64) -> Result<u128, ScoringError> {
     if !value.is_finite() || value < 0.0 {
-        return Err(ScoringError::BadAgentResult(format!("invalid price {value}")));
+        return Err(ScoringError::BadAgentResult(format!(
+            "invalid price {value}"
+        )));
     }
     Ok((value * crate::oracle::PRICE_SCALE as f64).round() as u128)
 }
@@ -113,7 +115,9 @@ pub struct ScorerRegistry {
 
 impl ScorerRegistry {
     pub fn new() -> Self {
-        Self { scorers: HashMap::new() }
+        Self {
+            scorers: HashMap::new(),
+        }
     }
 
     // To add a scorer under its own category id.

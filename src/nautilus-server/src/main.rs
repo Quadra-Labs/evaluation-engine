@@ -45,7 +45,10 @@ async fn main() -> Result<()> {
     let app = router.with_state(state).layer(cors);
 
     // Bind 0.0.0.0:3000 by default; PORT lets the engine run on an alternate port locally.
-    let port: u16 = std::env::var("PORT").ok().and_then(|p| p.parse().ok()).unwrap_or(3000);
+    let port: u16 = std::env::var("PORT")
+        .ok()
+        .and_then(|p| p.parse().ok())
+        .unwrap_or(3000);
     let listener = tokio::net::TcpListener::bind(("0.0.0.0", port)).await?;
     info!("listening on {}", listener.local_addr().unwrap());
     axum::serve(listener, app.into_make_service())

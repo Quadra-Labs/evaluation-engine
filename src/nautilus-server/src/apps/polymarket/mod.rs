@@ -121,7 +121,10 @@ async fn validate(pjob: PredictionJob) -> Result<ValidateResponse, EnclaveError>
     ensure_prediction_category(&pjob.job)?;
     job::ensure_timely(&pjob.job).map_err(to_enclave_error)?;
     job::validate_output_schema(&pjob.job).map_err(to_enclave_error)?;
-    Ok(ValidateResponse { valid: true, job_id: pjob.job.job_id })
+    Ok(ValidateResponse {
+        valid: true,
+        job_id: pjob.job.job_id,
+    })
 }
 
 async fn process(
@@ -129,7 +132,10 @@ async fn process(
     pjob: PredictionJob,
 ) -> Result<ProcessedDataResponse<IntentMessage<ScoreResult>>, EnclaveError> {
     let job = &pjob.job;
-    info!("polymarket job '{}' ({}) for agent '{}'", job.job_id, job.category_id, job.agent_id);
+    info!(
+        "polymarket job '{}' ({}) for agent '{}'",
+        job.job_id, job.category_id, job.agent_id
+    );
 
     ensure_prediction_category(job)?;
     job::ensure_timely(job).map_err(to_enclave_error)?;
@@ -139,7 +145,11 @@ async fn process(
         CAT_RESOLUTION => score_resolution(job, &pjob.params).await?,
         CAT_EVENT => score_event(job, &pjob.params).await?,
         CAT_PRICE => score_price(job, &pjob.params).await?,
-        other => return Err(EnclaveError::GenericError(format!("unsupported category '{other}'"))),
+        other => {
+            return Err(EnclaveError::GenericError(format!(
+                "unsupported category '{other}'"
+            )))
+        }
     };
     info!("polymarket job '{}' scored {}", job.job_id, score);
 
@@ -152,7 +162,12 @@ async fn process(
         score,
         finalized_price,
     };
-    Ok(to_signed_response(kp, result, timestamp_ms, IntentScope::Score as u8))
+    Ok(to_signed_response(
+        kp,
+        result,
+        timestamp_ms,
+        IntentScope::Score as u8,
+    ))
 }
 
 // --- per-category scoring ---------------------------------------------------
@@ -164,12 +179,17 @@ async fn score_resolution(
 ) -> Result<(u8, u64), EnclaveError> {
     let market_id = required_param(params, "market_id")?;
     let agent_outcome = result_str(job, "outcome")?;
-    let market = client::fetch_market(market_id).await.map_err(to_polymarket_error)?;
-    let winner = market
-        .winner()
-        .ok_or_else(|| EnclaveError::GenericError(format!("market {market_id} not resolved yet")))?;
+    let market = client::fetch_market(market_id)
+        .await
+        .map_err(to_polymarket_error)?;
+    let winner = market.winner().ok_or_else(|| {
+        EnclaveError::GenericError(format!("market {market_id} not resolved yet"))
+    })?;
     let yes_won = winner.trim().eq_ignore_ascii_case("yes");
-    Ok((score::score_resolution(agent_outcome, &winner), yes_won as u64))
+    Ok((
+        score::score_resolution(agent_outcome, &winner),
+        yes_won as u64,
+    ))
 }
 
 /// Job #2: coverage-weighted score over the event's markets. Requires every guessed market in the
@@ -181,7 +201,9 @@ async fn score_event(
 ) -> Result<(u8, u64), EnclaveError> {
     let event_id = required_param(params, "event_id")?;
     let guesses = parse_guesses(job)?;
-    let markets = client::fetch_event_markets(event_id).await.map_err(to_polymarket_error)?;
+    let markets = client::fetch_event_markets(event_id)
+        .await
+        .map_err(to_polymarket_error)?;
 
     let ids: BTreeSet<&str> = markets.iter().map(|m| m.id.as_str()).collect();
     let mut winners: BTreeMap<String, String> = BTreeMap::new();
@@ -216,9 +238,9 @@ async fn score_price(
     params: &BTreeMap<String, String>,
 ) -> Result<(u8, u64), EnclaveError> {
     let market_id = required_param(params, "market_id")?;
-    let target_ts: u64 = required_param(params, "target_ts")?
-        .parse()
-        .map_err(|_| EnclaveError::GenericError("param 'target_ts' is not a unix-seconds integer".into()))?;
+    let target_ts: u64 = required_param(params, "target_ts")?.parse().map_err(|_| {
+        EnclaveError::GenericError("param 'target_ts' is not a unix-seconds integer".into())
+    })?;
     let guess = result_f64(job, "probability")?;
 
     let now_s = now_unix_ms()? / 1000;
@@ -227,11 +249,15 @@ async fn score_price(
             "target_ts {target_ts} is in the future, not resolvable yet (now {now_s})"
         )));
     }
-    let market = client::fetch_market(market_id).await.map_err(to_polymarket_error)?;
-    let token = market
-        .yes_token_id()
-        .ok_or_else(|| EnclaveError::GenericError(format!("market {market_id} has no YES token id")))?;
-    let actual = client::fetch_price_at(&token, target_ts).await.map_err(to_polymarket_error)?;
+    let market = client::fetch_market(market_id)
+        .await
+        .map_err(to_polymarket_error)?;
+    let token = market.yes_token_id().ok_or_else(|| {
+        EnclaveError::GenericError(format!("market {market_id} has no YES token id"))
+    })?;
+    let actual = client::fetch_price_at(&token, target_ts)
+        .await
+        .map_err(to_polymarket_error)?;
     let finalized_bps = (actual.clamp(0.0, 1.0) * 10_000.0).round() as u64;
     Ok((score::score_price(guess, actual), finalized_bps))
 }
@@ -261,7 +287,9 @@ fn required_param<'a>(
 ) -> Result<&'a str, EnclaveError> {
     match params.get(key) {
         Some(v) if !v.trim().is_empty() => Ok(v.as_str()),
-        _ => Err(EnclaveError::GenericError(format!("job params missing '{key}'"))),
+        _ => Err(EnclaveError::GenericError(format!(
+            "job params missing '{key}'"
+        ))),
     }
 }
 
@@ -270,14 +298,22 @@ fn result_str<'a>(job: &'a JobEnvelope, field: &str) -> Result<&'a str, EnclaveE
     job.agent_result
         .get(field)
         .and_then(|v| v.as_str())
-        .ok_or_else(|| EnclaveError::GenericError(format!("agent_result '{field}' is missing field or not a string")))
+        .ok_or_else(|| {
+            EnclaveError::GenericError(format!(
+                "agent_result '{field}' is missing field or not a string"
+            ))
+        })
 }
 
 fn result_f64(job: &JobEnvelope, field: &str) -> Result<f64, EnclaveError> {
     job.agent_result
         .get(field)
         .and_then(|v| v.as_f64())
-        .ok_or_else(|| EnclaveError::GenericError(format!("agent_result '{field}' is missing field or not a number")))
+        .ok_or_else(|| {
+            EnclaveError::GenericError(format!(
+                "agent_result '{field}' is missing field or not a number"
+            ))
+        })
 }
 
 // The agent's guesses live in agent_result.guesses as a JSON-encoded array string (the data-layer
@@ -286,7 +322,9 @@ fn parse_guesses(job: &JobEnvelope) -> Result<Vec<Guess>, EnclaveError> {
     let raw = result_str(job, "guesses")?;
     serde_json::from_str::<Vec<Guess>>(raw).map_err(|e| {
         warn!("bad guesses for job '{}': {}", job.job_id, e);
-        EnclaveError::GenericError(format!("invalid guess list (not a JSON array of {{market_id,outcome}}): {e}"))
+        EnclaveError::GenericError(format!(
+            "invalid guess list (not a JSON array of {{market_id,outcome}}): {e}"
+        ))
     })
 }
 
@@ -329,7 +367,10 @@ mod test {
         let bytes = bcs::to_bytes(&sample()).unwrap();
         assert_eq!(&bytes[..32], &[0xab; 32]);
         assert_eq!(bytes[32] as usize, CAT_RESOLUTION.len()); // uleb128 length prefix (< 128)
-        assert_eq!(&bytes[33..33 + CAT_RESOLUTION.len()], CAT_RESOLUTION.as_bytes());
+        assert_eq!(
+            &bytes[33..33 + CAT_RESOLUTION.len()],
+            CAT_RESOLUTION.as_bytes()
+        );
     }
 
     #[test]

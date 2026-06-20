@@ -63,8 +63,10 @@ pub fn compute_metric(
         return Err(PortfolioError::EmptyPortfolio);
     }
 
-    let mut alloc: BTreeMap<String, i128> =
-        portfolio_start.iter().map(|(k, &v)| (k.clone(), v as i128)).collect();
+    let mut alloc: BTreeMap<String, i128> = portfolio_start
+        .iter()
+        .map(|(k, &v)| (k.clone(), v as i128))
+        .collect();
 
     for t in trades {
         if t.usd == 0 {
@@ -84,10 +86,12 @@ pub fn compute_metric(
         if usd == 0 {
             continue;
         }
-        let sp = *start_prices.get(asset).ok_or_else(|| PortfolioError::MissingPrice(asset.clone()))?
-            as i128;
-        let ep = *end_prices.get(asset).ok_or_else(|| PortfolioError::MissingPrice(asset.clone()))?
-            as i128;
+        let sp = *start_prices
+            .get(asset)
+            .ok_or_else(|| PortfolioError::MissingPrice(asset.clone()))? as i128;
+        let ep = *end_prices
+            .get(asset)
+            .ok_or_else(|| PortfolioError::MissingPrice(asset.clone()))? as i128;
         if sp <= 0 {
             return Err(PortfolioError::MissingPrice(asset.clone()));
         }
@@ -96,7 +100,11 @@ pub fn compute_metric(
 
     let roi_bps = (end_value - start_value) * 10_000 / start_value;
     let metric_signed = PERF_BASE as i128 + roi_bps;
-    let metric = if metric_signed <= 0 { 0 } else { metric_signed as u64 };
+    let metric = if metric_signed <= 0 {
+        0
+    } else {
+        metric_signed as u64
+    };
     Ok((roi_bps, metric))
 }
 
@@ -106,7 +114,10 @@ mod test {
 
     // Prices in 1e-8 fixed-point (oracle::PRICE_SCALE), the same units the oracle returns.
     fn scaled(pairs: &[(&str, u128)]) -> BTreeMap<String, u128> {
-        pairs.iter().map(|&(k, v)| (k.to_string(), v * 100_000_000)).collect()
+        pairs
+            .iter()
+            .map(|&(k, v)| (k.to_string(), v * 100_000_000))
+            .collect()
     }
     fn usd(pairs: &[(&str, u64)]) -> BTreeMap<String, u64> {
         pairs.iter().map(|&(k, v)| (k.to_string(), v)).collect()
@@ -133,7 +144,11 @@ mod test {
         let (hold_roi, _) = compute_metric(&start, &[], &sp, &ep).unwrap();
         assert_eq!(hold_roi, 1000); // 50/50 -> +10%
 
-        let trades = vec![Trade { from: "ETH".into(), to: "BTC".into(), usd: 5000 }];
+        let trades = vec![Trade {
+            from: "ETH".into(),
+            to: "BTC".into(),
+            usd: 5000,
+        }];
         let (roi, metric) = compute_metric(&start, &trades, &sp, &ep).unwrap();
         assert_eq!(roi, 2000); // all-in BTC -> +20%
         assert_eq!(metric, PERF_BASE + 2000);
@@ -155,7 +170,11 @@ mod test {
 
     #[test]
     fn overspending_an_asset_is_rejected() {
-        let trades = vec![Trade { from: "ETH".into(), to: "BTC".into(), usd: 6000 }];
+        let trades = vec![Trade {
+            from: "ETH".into(),
+            to: "BTC".into(),
+            usd: 6000,
+        }];
         let err = compute_metric(
             &usd(&[("BTC", 5000), ("ETH", 5000)]),
             &trades,

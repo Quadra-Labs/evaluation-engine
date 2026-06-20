@@ -6,10 +6,22 @@
 
 // (symbol, Pyth feed id without the 0x prefix, the way Hermes returns it).
 const FEEDS: &[(&str, &str)] = &[
-    ("BTC", "e62df6c8b4a85fe1a67db44dc12de5db330f7ac66b72dc658afedf0f4a415b43"),
-    ("ETH", "ff61491a931112ddf1bd8147cd1b641375f79f5825126d665480874634fd0ace"),
-    ("SOL", "ef0d8b6fda2ceba41da15d4095d1da392a0d2f8ed0c6c7bc0f4cfac8c280b56d"),
-    ("SUI", "23d7315113f5b1d3ba7a83604c44b94d79f4fd69af77f804fc7f920a6dc65744"),
+    (
+        "BTC",
+        "e62df6c8b4a85fe1a67db44dc12de5db330f7ac66b72dc658afedf0f4a415b43",
+    ),
+    (
+        "ETH",
+        "ff61491a931112ddf1bd8147cd1b641375f79f5825126d665480874634fd0ace",
+    ),
+    (
+        "SOL",
+        "ef0d8b6fda2ceba41da15d4095d1da392a0d2f8ed0c6c7bc0f4cfac8c280b56d",
+    ),
+    (
+        "SUI",
+        "23d7315113f5b1d3ba7a83604c44b94d79f4fd69af77f804fc7f920a6dc65744",
+    ),
 ];
 
 /// The Pyth feed id for a supported asset symbol (case-insensitive), or `None`.

@@ -109,27 +109,40 @@ fn client() -> Result<reqwest::Client, PolymarketError> {
 /// GET a URL and decode the body as JSON.
 async fn get_json(url: &str) -> Result<Value, PolymarketError> {
     info!("polymarket GET {url}");
-    let res = client()?.get(url).send().await.map_err(|e| PolymarketError::Request(e.to_string()))?;
+    let res = client()?
+        .get(url)
+        .send()
+        .await
+        .map_err(|e| PolymarketError::Request(e.to_string()))?;
     if !res.status().is_success() {
         return Err(PolymarketError::Request(format!("status {}", res.status())));
     }
-    res.json::<Value>().await.map_err(|e| PolymarketError::Decode(e.to_string()))
+    res.json::<Value>()
+        .await
+        .map_err(|e| PolymarketError::Decode(e.to_string()))
 }
 
 /// Read a JSON-string-encoded array of strings (Gamma's `outcomes` / `clobTokenIds` shape).
 fn parse_string_array(field: &str, v: &Value) -> Result<Vec<String>, PolymarketError> {
     let raw = v.get(field).and_then(|x| x.as_str()).ok_or_else(|| {
-        PolymarketError::Decode(format!("market field '{field}' missing or not a JSON string"))
+        PolymarketError::Decode(format!(
+            "market field '{field}' missing or not a JSON string"
+        ))
     })?;
-    serde_json::from_str::<Vec<String>>(raw)
-        .map_err(|e| PolymarketError::Decode(format!("market field '{field}' is not a JSON array: {e}")))
+    serde_json::from_str::<Vec<String>>(raw).map_err(|e| {
+        PolymarketError::Decode(format!("market field '{field}' is not a JSON array: {e}"))
+    })
 }
 
 /// Read Gamma's `outcomePrices` (JSON-string array of decimal strings) into f64s.
 fn parse_price_array(v: &Value) -> Result<Vec<f64>, PolymarketError> {
     parse_string_array("outcomePrices", v)?
         .iter()
-        .map(|s| s.trim().parse::<f64>().map_err(|e| PolymarketError::Decode(e.to_string())))
+        .map(|s| {
+            s.trim()
+                .parse::<f64>()
+                .map_err(|e| PolymarketError::Decode(e.to_string()))
+        })
         .collect()
 }
 
@@ -156,7 +169,10 @@ fn market_from_value(v: &Value) -> Result<Market, PolymarketError> {
 /// Gamma single-object endpoints sometimes return a one-element array; unwrap either shape.
 fn first_object(v: Value) -> Result<Value, PolymarketError> {
     match v {
-        Value::Array(mut a) => a.drain(..).next().ok_or_else(|| PolymarketError::NotFound("empty array".into())),
+        Value::Array(mut a) => a
+            .drain(..)
+            .next()
+            .ok_or_else(|| PolymarketError::NotFound("empty array".into())),
         other => Ok(other),
     }
 }
@@ -205,8 +221,9 @@ pub async fn fetch_price_at(token_id: &str, target_ts: u64) -> Result<f64, Polym
             }
         }
     }
-    best.map(|(_, p)| p)
-        .ok_or_else(|| PolymarketError::Unresolved(format!("no price for token {token_id} near {target_ts}")))
+    best.map(|(_, p)| p).ok_or_else(|| {
+        PolymarketError::Unresolved(format!("no price for token {token_id} near {target_ts}"))
+    })
 }
 
 /// A JSON value that may be a number or a numeric string -> u64.

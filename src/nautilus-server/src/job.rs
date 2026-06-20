@@ -65,23 +65,38 @@ impl fmt::Display for JobError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             JobError::WrongCategory { expected, got } => {
-                write!(f, "this enclave only serves category '{expected}', got '{got}'")
+                write!(
+                    f,
+                    "this enclave only serves category '{expected}', got '{got}'"
+                )
             }
             JobError::DeliveredBeforeStart => {
                 write!(f, "delivered_at_ms is before started_at_ms")
             }
-            JobError::DeliveredTooLate { elapsed_ms, allowed_ms } => {
+            JobError::DeliveredTooLate {
+                elapsed_ms,
+                allowed_ms,
+            } => {
                 write!(f, "job delivered too late: took {elapsed_ms}ms but lifetime allows {allowed_ms}ms")
             }
             JobError::BadLifetime(s) => write!(f, "could not parse lifetime '{s}'"),
             JobError::MissingField(field) => {
-                write!(f, "agent_result is missing field '{field}' promised by the job template")
+                write!(
+                    f,
+                    "agent_result is missing field '{field}' promised by the job template"
+                )
             }
             JobError::TypeMismatch { field, expected } => {
-                write!(f, "agent_result field '{field}' is not of type '{expected}'")
+                write!(
+                    f,
+                    "agent_result field '{field}' is not of type '{expected}'"
+                )
             }
             JobError::UnknownType { field, declared } => {
-                write!(f, "job template field '{field}' declares unknown type '{declared}'")
+                write!(
+                    f,
+                    "job template field '{field}' declares unknown type '{declared}'"
+                )
             }
             JobError::BadAddress(s) => write!(f, "agent_id is not a valid Sui address: {s}"),
         }
@@ -121,7 +136,10 @@ pub fn ensure_timely(job: &JobEnvelope) -> Result<(), JobError> {
     let elapsed_ms = job.delivered_at_ms - job.started_at_ms;
     let allowed_ms = parse_lifetime_ms(&job.job_template.lifetime)?;
     if elapsed_ms > allowed_ms {
-        return Err(JobError::DeliveredTooLate { elapsed_ms, allowed_ms });
+        return Err(JobError::DeliveredTooLate {
+            elapsed_ms,
+            allowed_ms,
+        });
     }
     Ok(())
 }
@@ -169,10 +187,8 @@ pub fn parse_sui_address(value: &str) -> Result<[u8; 32], JobError> {
     }
     let mut out = [0u8; 32];
     for (i, chunk) in trimmed.as_bytes().chunks(2).enumerate() {
-        let pair = std::str::from_utf8(chunk)
-            .map_err(|e| JobError::BadAddress(e.to_string()))?;
-        out[i] = u8::from_str_radix(pair, 16)
-            .map_err(|e| JobError::BadAddress(e.to_string()))?;
+        let pair = std::str::from_utf8(chunk).map_err(|e| JobError::BadAddress(e.to_string()))?;
+        out[i] = u8::from_str_radix(pair, 16).map_err(|e| JobError::BadAddress(e.to_string()))?;
     }
     Ok(out)
 }
@@ -240,7 +256,10 @@ mod test {
     #[test]
     fn resolution_time_is_start_plus_lifetime() {
         let job = sample_job();
-        assert_eq!(resolution_time_ms(&job).unwrap(), job.started_at_ms + 300_000);
+        assert_eq!(
+            resolution_time_ms(&job).unwrap(),
+            job.started_at_ms + 300_000
+        );
     }
 
     #[test]
@@ -267,7 +286,10 @@ mod test {
         assert!(ensure_timely(&job).is_err());
 
         job.delivered_at_ms = job.started_at_ms - 1;
-        assert!(matches!(ensure_timely(&job), Err(JobError::DeliveredBeforeStart)));
+        assert!(matches!(
+            ensure_timely(&job),
+            Err(JobError::DeliveredBeforeStart)
+        ));
     }
 
     #[test]
@@ -276,10 +298,16 @@ mod test {
         assert!(validate_output_schema(&job).is_ok());
 
         job.agent_result = json!({ "minPrice": 60000 });
-        assert!(matches!(validate_output_schema(&job), Err(JobError::MissingField(_))));
+        assert!(matches!(
+            validate_output_schema(&job),
+            Err(JobError::MissingField(_))
+        ));
 
         job.agent_result = json!({ "minPrice": "low", "maxPrice": 60100 });
-        assert!(matches!(validate_output_schema(&job), Err(JobError::TypeMismatch { .. })));
+        assert!(matches!(
+            validate_output_schema(&job),
+            Err(JobError::TypeMismatch { .. })
+        ));
     }
 
     #[test]

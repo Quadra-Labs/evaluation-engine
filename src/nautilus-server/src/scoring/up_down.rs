@@ -40,7 +40,9 @@ impl Scorer for UpDownScorer {
         let guess: AgentGuess = serde_json::from_value(job.agent_result.clone())
             .map_err(|e| ScoringError::BadAgentResult(e.to_string()))?;
         if !guess.confidence.is_finite() {
-            return Err(ScoringError::BadAgentResult("confidence is not a number".to_string()));
+            return Err(ScoringError::BadAgentResult(
+                "confidence is not a number".to_string(),
+            ));
         }
         // Whole-percent confidence, clamped to the valid [0.5, 1] band.
         let conf_pct = ((guess.confidence * 100.0).round() as i64).clamp(50, 100);
@@ -58,7 +60,7 @@ fn score_brier(is_up: bool, conf_pct: i64, outcome_up: bool) -> u8 {
     let p_up = if is_up { conf_pct } else { 100 - conf_pct };
     let outcome = if outcome_up { 100 } else { 0 };
     let diff = p_up - outcome; // in [-100, 100]
-    // (diff/100)^2 * 100 = diff^2 / 100.
+                               // (diff/100)^2 * 100 = diff^2 / 100.
     let loss = (diff * diff) / 100; // 0..=100
     (100 - loss).clamp(0, 100) as u8
 }

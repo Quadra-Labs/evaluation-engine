@@ -30,9 +30,15 @@ impl std::fmt::Display for OracleError {
         match self {
             OracleError::Request(e) => write!(f, "oracle request failed: {e}"),
             OracleError::Decode(e) => write!(f, "could not decode oracle response: {e}"),
-            OracleError::FeedNotFound(id) => write!(f, "feed '{id}' was not in the oracle response"),
-            OracleError::NonPositivePrice(p) => write!(f, "oracle returned a non positive price: {p}"),
-            OracleError::OutOfRange => write!(f, "oracle price did not fit a u64 after normalizing"),
+            OracleError::FeedNotFound(id) => {
+                write!(f, "feed '{id}' was not in the oracle response")
+            }
+            OracleError::NonPositivePrice(p) => {
+                write!(f, "oracle returned a non positive price: {p}")
+            }
+            OracleError::OutOfRange => {
+                write!(f, "oracle price did not fit a u64 after normalizing")
+            }
         }
     }
 }
@@ -69,7 +75,10 @@ pub async fn fetch_price_scaled(feed_id: &str, at_unix_seconds: u64) -> Result<u
 // The raw Pyth integer price plus its exponent for a feed at a timestamp.
 async fn fetch_raw(feed_id: &str, at_unix_seconds: u64) -> Result<(i128, i32), OracleError> {
     let url = format!("https://{PYTH_HERMES_HOST}/v2/updates/price/{at_unix_seconds}");
-    info!("asking pyth for feed {} at unix second {}", feed_id, at_unix_seconds);
+    info!(
+        "asking pyth for feed {} at unix second {}",
+        feed_id, at_unix_seconds
+    );
 
     let client = reqwest::Client::builder()
         .timeout(std::time::Duration::from_secs(10))
@@ -125,10 +134,14 @@ pub fn normalize_to_scaled(price: i128, expo: i32) -> Result<u128, OracleError> 
 
     let shift = expo + 8;
     let scaled: i128 = if shift >= 0 {
-        let mul = 10i128.checked_pow(shift as u32).ok_or(OracleError::OutOfRange)?;
+        let mul = 10i128
+            .checked_pow(shift as u32)
+            .ok_or(OracleError::OutOfRange)?;
         price.checked_mul(mul).ok_or(OracleError::OutOfRange)?
     } else {
-        let div = 10i128.checked_pow((-shift) as u32).ok_or(OracleError::OutOfRange)?;
+        let div = 10i128
+            .checked_pow((-shift) as u32)
+            .ok_or(OracleError::OutOfRange)?;
         // Round to the nearest 1e-8 unit.
         (price + div / 2) / div
     };
@@ -150,13 +163,19 @@ mod test {
     #[test]
     fn normalizes_typical_btc_price() {
         // 60203.45 USD as Pyth sends it with expo -8 -> already in 1e-8 units.
-        assert_eq!(normalize_to_scaled(6_020_345_000_000, -8).unwrap(), 6_020_345_000_000);
+        assert_eq!(
+            normalize_to_scaled(6_020_345_000_000, -8).unwrap(),
+            6_020_345_000_000
+        );
     }
 
     #[test]
     fn scales_other_exponents_to_1e8() {
         // expo -2 means the integer is in cents; 6_020_345 * 10^(−2+8) = ...e8 units.
-        assert_eq!(normalize_to_scaled(6_020_345, -2).unwrap(), 6_020_345_000_000);
+        assert_eq!(
+            normalize_to_scaled(6_020_345, -2).unwrap(),
+            6_020_345_000_000
+        );
         // expo 0: 3 -> 3 * 1e8.
         assert_eq!(normalize_to_scaled(3, 0).unwrap(), 300_000_000);
     }
@@ -175,7 +194,13 @@ mod test {
 
     #[test]
     fn rejects_non_positive_price() {
-        assert!(matches!(normalize_to_scaled(0, -8), Err(OracleError::NonPositivePrice(_))));
-        assert!(matches!(normalize_to_scaled(-5, -8), Err(OracleError::NonPositivePrice(_))));
+        assert!(matches!(
+            normalize_to_scaled(0, -8),
+            Err(OracleError::NonPositivePrice(_))
+        ));
+        assert!(matches!(
+            normalize_to_scaled(-5, -8),
+            Err(OracleError::NonPositivePrice(_))
+        ));
     }
 }

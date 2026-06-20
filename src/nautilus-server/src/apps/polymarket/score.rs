@@ -39,7 +39,11 @@ pub fn score_resolution(agent_outcome: &str, winner: &str) -> u8 {
 /// winning outcome. `total_markets` is the number of markets in the whole event (the denominator,
 /// so partial coverage caps the score). A guess for a market not in `winners` scores nothing.
 /// `total_markets == 0` is a degenerate event -> 0.
-pub fn score_event(guesses: &[Guess], winners: &BTreeMap<String, String>, total_markets: usize) -> u8 {
+pub fn score_event(
+    guesses: &[Guess],
+    winners: &BTreeMap<String, String>,
+    total_markets: usize,
+) -> u8 {
     if total_markets == 0 {
         return 0;
     }
@@ -74,12 +78,18 @@ mod test {
     use super::*;
 
     fn winners(pairs: &[(&str, &str)]) -> BTreeMap<String, String> {
-        pairs.iter().map(|&(k, v)| (k.to_string(), v.to_string())).collect()
+        pairs
+            .iter()
+            .map(|&(k, v)| (k.to_string(), v.to_string()))
+            .collect()
     }
     fn guesses(pairs: &[(&str, &str)]) -> Vec<Guess> {
         pairs
             .iter()
-            .map(|&(m, o)| Guess { market_id: m.to_string(), outcome: o.to_string() })
+            .map(|&(m, o)| Guess {
+                market_id: m.to_string(),
+                outcome: o.to_string(),
+            })
             .collect()
     }
 

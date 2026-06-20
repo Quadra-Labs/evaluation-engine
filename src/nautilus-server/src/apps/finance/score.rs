@@ -42,11 +42,17 @@ pub struct StartDataResponse {
 // Input validation only (no oracle, no scoring). The job's category must be one of the score
 // categories this engine serves; the matching scorer is selected later by category_id.
 pub async fn validate(job: JobEnvelope) -> Result<ValidateResponse, EnclaveError> {
-    info!("validating job '{}' for agent '{}'", job.job_id, job.agent_id);
+    info!(
+        "validating job '{}' for agent '{}'",
+        job.job_id, job.agent_id
+    );
     job::ensure_category_in(&job, SCORE_CATEGORIES).map_err(to_enclave_error)?;
     job::ensure_timely(&job).map_err(to_enclave_error)?;
     job::validate_output_schema(&job).map_err(to_enclave_error)?;
-    Ok(ValidateResponse { valid: true, job_id: job.job_id })
+    Ok(ValidateResponse {
+        valid: true,
+        job_id: job.job_id,
+    })
 }
 
 pub async fn start_data(req: StartDataRequest) -> Result<StartDataResponse, EnclaveError> {
@@ -55,8 +61,13 @@ pub async fn start_data(req: StartDataRequest) -> Result<StartDataResponse, Encl
     let price = oracle::fetch_price_scaled(feed, req.at_ms / 1000)
         .await
         .map_err(|e| EnclaveError::GenericError(format!("oracle fetch failed: {e}")))?;
-    info!("start price for {} at {}ms is {} (1e-8 units)", req.asset, req.at_ms, price);
-    Ok(StartDataResponse { start_data: serde_json::json!({ "start_price": price }) })
+    info!(
+        "start price for {} at {}ms is {} (1e-8 units)",
+        req.asset, req.at_ms, price
+    );
+    Ok(StartDataResponse {
+        start_data: serde_json::json!({ "start_price": price }),
+    })
 }
 
 // Full scoring pipeline at resolution: resolve the end price, score against the delivered start
@@ -65,7 +76,10 @@ pub async fn process(
     kp: &Ed25519KeyPair,
     job: JobEnvelope,
 ) -> Result<ProcessedDataResponse<IntentMessage<ScoreResult>>, EnclaveError> {
-    info!("scoring job '{}' (asset {}) in '{}'", job.job_id, job.asset, job.category_id);
+    info!(
+        "scoring job '{}' (asset {}) in '{}'",
+        job.job_id, job.asset, job.category_id
+    );
 
     job::ensure_category_in(&job, SCORE_CATEGORIES).map_err(to_enclave_error)?;
     job::ensure_timely(&job).map_err(to_enclave_error)?;
@@ -75,7 +89,10 @@ pub async fn process(
     let resolve_at_ms = job::resolution_time_ms(&job).map_err(to_enclave_error)?;
     let timestamp_ms = now_unix_ms()?;
     if resolve_at_ms > timestamp_ms {
-        warn!("job '{}' resolves at {}ms but now is {}ms", job.job_id, resolve_at_ms, timestamp_ms);
+        warn!(
+            "job '{}' resolves at {}ms but now is {}ms",
+            job.job_id, resolve_at_ms, timestamp_ms
+        );
         return Err(EnclaveError::GenericError(format!(
             "job is not resolvable yet, resolves at {resolve_at_ms}ms but now is {timestamp_ms}ms"
         )));
@@ -87,7 +104,10 @@ pub async fn process(
         .await
         .map_err(|e| EnclaveError::GenericError(format!("oracle fetch failed: {e}")))?;
     let start_price = start_price_from(&job.start_data)?;
-    info!("job '{}': start {} end {} (1e-8 units)", job.job_id, start_price, end_price);
+    info!(
+        "job '{}': start {} end {} (1e-8 units)",
+        job.job_id, start_price, end_price
+    );
 
     let registry = build_registry();
     let scorer = registry.get(&job.category_id).ok_or_else(|| {
@@ -107,7 +127,12 @@ pub async fn process(
         finalized_price: oracle::scaled_to_usd(end_price),
     };
 
-    Ok(to_signed_response(kp, result, timestamp_ms, IntentScope::Score as u8))
+    Ok(to_signed_response(
+        kp,
+        result,
+        timestamp_ms,
+        IntentScope::Score as u8,
+    ))
 }
 
 // The delivered start price, read from the job envelope's start_data (1e-8 units).
