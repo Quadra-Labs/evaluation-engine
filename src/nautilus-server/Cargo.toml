@@ -30,14 +30,11 @@ lazy_static = "1.4"
 uuid = { version = "1.0", features = ["v4"] }
 
 [features]
-default = ["finance"]
-# FINANCE engine: ONE binary serving every finance-class category — the three u8-score "guess"
+default = ["evaluation"]
+# Single combined EVALUATION engine: ONE binary serving every category — the three u8-score "guess"
 # categories (price-range-guess, up-down-guess, movement-percentage-guess) via the shared scoring
-# registry + endpoints, AND the u64-metric portfolio-roi via its own pipeline. Compiles the job
-# model, Pyth oracle, asset map, scoring, and the portfolio math. The /process_data + /validate
-# handlers dispatch by category_id. Build with: --no-default-features --features finance.
-finance = []
-# PREDICTION engine: the three polymarket-* categories (resolution, event, price) with a u8 score
-# via the Polymarket client (no Pyth oracle / asset map). Already dispatches by category_id. Its
-# Rust code lives in apps/polymarket/ (gated by this feature). Build: --no-default-features --features prediction.
-prediction = []
+# registry, the u64-metric portfolio-roi via its own pipeline, AND the three polymarket-* prediction
+# categories. The /process_data + /validate handlers dispatch by category_id. This feature is a
+# no-op label kept only so the deterministic enclave build stays
+# `--no-default-features --features evaluation`.
+evaluation = []

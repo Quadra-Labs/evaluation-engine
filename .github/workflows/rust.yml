@@ -40,42 +40,34 @@ jobs:
       - run: scripts/license_check.sh
 
   test:
-    runs-on: ${{ matrix.os }}
-    strategy:
-      matrix:
-        os: [ubuntu-ghcloud]
-        feature: [weather-example, twitter-example, seal-example]
-      fail-fast: false
+    runs-on: ubuntu-ghcloud
     env:
       RUSTFLAGS: -D warnings
     steps:
       - uses: actions/checkout@ac593985615ec2ede58e132d2e21d2b1cbd6127c # pin@v3
       - name: Install correct Rust toolchain
         run: rustup update && rustup toolchain install
-      - uses: taiki-e/install-action@d30f7ecb94d4d882276efb3967be14b8ef34d289 # pin@nextest
-      - name: cargo test (${{ matrix.feature }})
+      # One combined evaluation engine (default feature) serving every category.
+      - name: cargo test
         working-directory: src/nautilus-server
-        run: cargo test --no-default-features --features ${{ matrix.feature }}
-      - name: Doctests (${{ matrix.feature }})
+        run: cargo test
+      - name: Doctests
         working-directory: src/nautilus-server
-        run: cargo test --doc --no-default-features --features ${{ matrix.feature }}
+        run: cargo test --doc
       # Ensure there are no uncommitted changes after tests
       - run: scripts/changed-files.sh
 
   clippy:
-    name: cargo clippy (${{ matrix.feature }})
+    name: cargo clippy
     runs-on: ubuntu-ghcloud
-    strategy:
-      matrix:
-        feature: [weather-example, twitter-example, seal-example]
     steps:
       - uses: actions/checkout@ac593985615ec2ede58e132d2e21d2b1cbd6127c # pin@v3
       - name: Install correct Rust toolchain
         run: rustup update && rustup toolchain install
       # See '.cargo/config' for list of enabled/disabled clippy lints
-      - name: cargo clippy (${{ matrix.feature }})
+      - name: cargo clippy
         working-directory: src/nautilus-server
-        run: cargo clippy --no-default-features --features ${{ matrix.feature }} -- -D warnings
+        run: cargo clippy --all-targets -- -D warnings
 
   rustfmt:
     runs-on: ubuntu-latest

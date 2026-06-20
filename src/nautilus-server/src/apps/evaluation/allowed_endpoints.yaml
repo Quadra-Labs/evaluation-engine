@@ -1,0 +1,7 @@
+# The combined evaluation engine resolves finance prices from Pyth Hermes AND polymarket
+# resolution / historical prices from Polymarket's public Gamma and CLOB APIs, so all three hosts
+# must be reachable. The enclave has no other outbound access.
+endpoints:
+  - hermes.pyth.network
+  - gamma-api.polymarket.com
+  - clob.polymarket.com

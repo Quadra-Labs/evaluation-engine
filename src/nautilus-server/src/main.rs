@@ -5,12 +5,10 @@ use anyhow::Result;
 use axum::{routing::get, routing::post, Router};
 use fastcrypto::{ed25519::Ed25519KeyPair, traits::KeyPair};
 use nautilus_server::common::{get_attestation, health_check};
-// Both engines expose process_data / validate_input through `app` (finance dispatches by
-// category_id; prediction matches on the polymarket-* categories). Only the finance engine has the
-// delivery-price /start_data step — prediction resolves everything itself at scoring time.
-use nautilus_server::app::{process_data, validate_input};
-#[cfg(feature = "finance")]
-use nautilus_server::app::start_data;
+// The combined engine exposes process_data / validate_input / start_data through `app`, which
+// dispatches by category_id to the finance or prediction pipeline. The delivery-price /start_data
+// step is asset-keyed and used only by the finance score categories; prediction never calls it.
+use nautilus_server::app::{process_data, start_data, validate_input};
 use nautilus_server::AppState;
 use std::sync::Arc;
 use tower_http::cors::{Any, CorsLayer};
@@ -41,17 +39,12 @@ async fn main() -> Result<()> {
         .route("/get_attestation", get(get_attestation))
         .route("/process_data", post(process_data))
         .route("/validate", post(validate_input))
+        .route("/start_data", post(start_data))
         .route("/health_check", get(health_check));
-
-    // The /start_data (delivery price snapshot) step exists only on the finance engine's score
-    // categories; the prediction engine resolves everything itself, so it has no /start_data route.
-    #[cfg(feature = "finance")]
-    let router = router.route("/start_data", post(start_data));
 
     let app = router.with_state(state).layer(cors);
 
-    // Bind 0.0.0.0:3000 by default; PORT lets the finance and prediction engines run side by side
-    // locally, each mapped to its own URL in the eval-engines registry / EVAL_ENGINES.
+    // Bind 0.0.0.0:3000 by default; PORT lets the engine run on an alternate port locally.
     let port: u16 = std::env::var("PORT").ok().and_then(|p| p.parse().ok()).unwrap_or(3000);
     let listener = tokio::net::TcpListener::bind(("0.0.0.0", port)).await?;
     info!("listening on {}", listener.local_addr().unwrap());

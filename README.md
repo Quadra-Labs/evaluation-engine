@@ -1,53 +1,71 @@
-# Quadra evaluation engines
+# Quadra evaluation engine
 
-Quadra runs each job evaluator in its own Sui Nautilus enclave. One enclave
-serves one evaluator and nothing else. That keeps every evaluator's scoring code,
-its outbound network allow list, and its PCR measurements fully isolated from
-the others.
+Quadra scores every job inside a single Sui Nautilus enclave, which is a secure box on AWS
+Nitro. One enclave image serves every evaluator category and dispatches each job by its
+`category_id`. Keeping all the scoring code, the outbound network allow list, and the PCR
+measurements in one image means there is one engine to deploy, one enclave identity to register
+on-chain, and one URL the scheduler and competition engine route to.
 
-The finance evaluators (all `category: finance`) are:
+The categories fall into two families.
+
+The finance evaluators (all `category: finance`) predict a curated asset's price:
 
 | evaluator_id                 | agent output                       | scoring |
 | ---------------------------- | ---------------------------------- | --- |
-| `price-range-guess`          | `{ minPrice, maxPrice }`           | end price in band → 100, else decay vs a **start-price-relative, √lifetime-scaled** tolerance |
-| `up-down-guess`              | `{ isUp, confidence∈[0.5,1] }`     | Brier `(p_up − outcome)²` mapped to [0,100] |
-| `movement-percentage-guess`  | `{ percentage }`                   | gentle decay of `|guess − actual%|` (no cliff) |
+| `price-range-guess`          | `{ minPrice, maxPrice }`           | end price in band -> 100, else decay vs a **start-price-relative, sqrt(lifetime)-scaled** tolerance |
+| `up-down-guess`              | `{ isUp, confidence in [0.5,1] }`  | Brier `(p_up - outcome)^2` mapped to [0,100] |
+| `movement-percentage-guess`  | `{ percentage }`                   | gentle decay of `|guess - actual%|` (no cliff) |
+| `portfolio-roi`              | `{ trades }`                       | a `u64` ROI **metric** (not a [0,100] score), recorded as performance |
 
-All three predict a curated asset's price (BTC, ETH, SOL, SUI for now — see
-`src/asset.rs`). The price at **delivery** (start_price) is captured via
-`/start_data` and scored against the price at **resolution** (`started_at +
-lifetime`). Prices are 1e-8 fixed-point integers so cheap assets and percentage
-math stay precise and integer-only.
+The first three predict a curated asset (BTC, ETH, SOL, SUI for now -- see `src/asset.rs`). The
+price at **delivery** (start_price) is captured via `/start_data` and scored against the price at
+**resolution** (`started_at + lifetime`). Prices are 1e-8 fixed-point integers so cheap assets and
+percentage math stay precise and integer-only. `portfolio-roi` is a PERFORMANCE evaluator: it signs
+a `u64` ROI metric with a distinct intent scope, so it can never be replayed as a `[0,100]` score.
 
-## How an evaluator maps to the enclave
+The prediction evaluators resolve ground truth from Polymarket's Gamma and CLOB APIs (not Pyth) and
+read `market_id`, `event_id`, and `target_ts` from the job `params`:
 
-Each evaluator is one Cargo feature plus one app directory; everything else is
-shared (gated behind the `finance` feature the evaluators enable):
+| evaluator_id            | agent output                  | scoring |
+| ----------------------- | ----------------------------- | --- |
+| `polymarket-resolution` | `{ outcome }`                 | 100 if `outcome` matches the market's resolved winner, else 0 |
+| `polymarket-event`      | `{ guesses }` (JSON array)    | coverage-weighted: correct guesses over the event's total markets, mapped to [0,100] |
+| `polymarket-price`      | `{ probability }` in [0,1]    | Brier closeness of `probability` to the real CLOB YES price at `target_ts` |
+
+## How the engine is laid out
+
+Everything compiles into one binary; a top-level dispatcher routes by `category_id`:
 
 ```
 src/nautilus-server/
-  Cargo.toml                         # one [features] entry per evaluator (+ `finance`)
+  Cargo.toml                         # one no-op `evaluation` feature (default); selects nothing
   src/
-    asset.rs                         # curated asset -> Pyth feed-id map
+    main.rs                          # axum router: /validate /process_data /start_data /health_check
+    app.rs                           # top-level dispatcher: peek category_id -> finance or prediction
+    common.rs                        # shared IntentMessage, signing, attestation, health check
     job.rs                           # shared job envelope + validation
-    oracle.rs                        # Pyth Hermes fetch, fixed-point (1e-8) prices
-    endpoints.rs                     # shared /validate, /start_data, /process_data
-    scoring/
-      mod.rs                         # Scorer trait, ScorerRegistry, ScoreResult
-      price_range.rs up_down.rs movement_pct.rs
+    asset.rs                         # curated asset -> Pyth feed-id map (finance)
+    oracle.rs                        # Pyth Hermes fetch, fixed-point (1e-8) prices (finance)
+    scoring/                         # Scorer trait + the three finance score scorers
+      mod.rs price_range.rs up_down.rs movement_pct.rs
     apps/
-      price-range-guess/             # mod.rs (CATEGORY_ID + build_registry) + allowed_endpoints.yaml
-      up-down-guess/
-      movement-percentage-guess/
+      finance/                       # finance sub-engine: dispatches score categories + portfolio-roi
+        mod.rs score.rs portfolio.rs roi.rs
+      polymarket/                    # prediction sub-engine: the three polymarket-* categories
+        mod.rs score.rs client.rs
+      evaluation/
+        allowed_endpoints.yaml       # the one outbound allow list (Pyth + Polymarket hosts)
 ```
 
-The active evaluator is chosen at build time by its feature flag
-(`--no-default-features --features <evaluator_id>`). Exactly one is enabled per
-build, so each enclave image contains a single evaluator.
+`app.rs` peeks `payload.category_id` on the untyped body and forwards the request to the finance or
+prediction sub-engine. Both sub-engines expose Value-based `validate_input` / `process_data`
+handlers and re-deserialize the body into their own typed job (the peek must come first, because
+`PortfolioJob` and `PredictionJob` both flatten the job envelope). Each sub-engine still rejects any
+category outside its set as a backstop.
 
 ## The job in, the score out
 
-A job is POSTed to `/process_data` wrapped in `{ "payload": { ... } }`:
+A job is POSTed to `/process_data` wrapped in `{ "payload": { ... } }`. A finance score job:
 
 ```json
 {
@@ -65,132 +83,112 @@ A job is POSTed to `/process_data` wrapped in `{ "payload": { ... } }`:
 }
 ```
 
-`asset` selects the price feed; `start_data.start_price` is the 1e-8 fixed-point
-price captured at delivery (from `/start_data`). Both are added by the scheduler.
+`asset` selects the price feed; `start_data.start_price` is the 1e-8 fixed-point price captured at
+delivery (from `/start_data`). Both are added by the scheduler. A polymarket job carries no `asset`
+and no `start_data`; instead it has `params` (the fixed competition values the evaluator resolves
+against Polymarket) and an informational `window`.
 
 Notes:
 
-- There is no `finalized_result` in the request. The engine resolves the real
-  value itself from its oracle (see `oracle.rs`), so the caller can not forge it.
-- `agent_result` is free-form JSON. Only the category's scorer knows how to read
-  it.
-- `agent_id` is a `0x` Sui address (32 bytes). It is signed back as raw bytes so
-  it lines up with a Move `address` on the verifier.
-- Timestamps are epoch milliseconds, not ISO strings. This keeps the enclave
-  free of a date parsing dependency and the build deterministic.
-- The resolution moment is `started_at_ms + lifetime`. The engine reads the
-  price at that exact time, so the score does not depend on when it is called.
-  A job is rejected if that moment is still in the future.
+- There is no `finalized_result` in the request. The engine resolves the real value itself (from
+  Pyth for finance, from Polymarket for prediction), so the caller can not forge it.
+- `agent_result` is free-form JSON. Only the category's scorer knows how to read it.
+- `agent_id` is a `0x` Sui address (32 bytes), signed back as raw bytes so it lines up with a Move
+  `address` on the verifier.
+- Timestamps are epoch milliseconds, not ISO strings. This keeps the enclave free of a date parsing
+  dependency and the build deterministic.
 
-The enclave validates the job, scores it in `[0, 100]`, and signs the result:
+The enclave validates the job, scores it, and signs the result:
 
 ```json
 {
   "response": {
     "intent": 0,
     "timestamp_ms": 1700000061000,
-    "data": { "agent_id": [171, ...], "category_id": "price-range-guess", "job_id": "job-1", "score": 100 }
+    "data": { "agent_id": [171, "..."], "category_id": "price-range-guess", "job_id": "job-1", "score": 100, "finalized_price": 6050000000000 }
   },
   "signature": "<hex ed25519 over bcs(IntentMessage{intent, timestamp_ms, data})>"
 }
 ```
 
+`intent` is `0` for a score and `1` for the `portfolio-roi` metric. The signed BCS layout is the
+contract the on-chain verifier depends on, so it does not change.
+
 ## Validation order
 
-1. `ensure_category` rejects any job whose `category_id` is not the one this
-   enclave was built for.
-2. `ensure_timely` rejects deliveries that landed after `started_at_ms` plus the
-   template `lifetime`.
-3. `validate_output_schema` rejects an `agent_result` that does not carry every
-   field the template promised, with the right JSON type.
-4. The engine resolves the ground truth from its oracle at the job resolution
-   time, rejecting the job if that time has not arrived yet.
-5. The scorer reads `agent_result` plus the resolved ground truth and returns
-   the score.
+1. `ensure_category` rejects any job whose `category_id` the engine does not serve.
+2. `ensure_timely` rejects deliveries that landed after `started_at_ms` plus the template
+   `lifetime`.
+3. `validate_output_schema` rejects an `agent_result` that does not carry every field the template
+   promised, with the right JSON type.
+4. The engine resolves the ground truth (Pyth at the resolution time for finance; Polymarket for
+   prediction), rejecting the job if that value is not available yet.
+5. The scorer reads `agent_result` plus the resolved ground truth and returns the score.
 
 ## Two purposes: validate, then score
 
-Each engine serves both halves of a job's life:
+The engine serves both halves of a job's life:
 
-- **`POST /validate`** — input validation only (steps 1–3 above; no oracle, no
-  scoring). Same `{ "payload": { ... } }` body as `/process_data`. Returns
-  `{ "valid": true, "job_id": ... }`, or a 400 with the rejection reason. The
-  scheduler's **validator engine** calls this when an agent claims delivery, so
-  the intake engine can release payment without reading the sealed result. The
-  response is unsigned: validation only gates payment, scores are the signed,
-  verifiable artifact.
-- **`POST /process_data`** — the full pipeline (steps 1–5) at lifetime end,
-  called by the **scheduler engine**; returns the enclave-signed score.
+- **`POST /validate`** -- input validation only (steps 1-3; no oracle, no scoring). Same
+  `{ "payload": { ... } }` body as `/process_data`. Returns `{ "valid": true, "job_id": ... }`, or a
+  400 with the rejection reason. The scheduler's validator calls this when an agent claims delivery,
+  so intake can release payment without reading the sealed result. The response is unsigned:
+  validation only gates payment, scores are the signed, verifiable artifact.
+- **`POST /process_data`** -- the full pipeline (steps 1-5) at lifetime end, called by the scheduler
+  engine; returns the enclave-signed score or metric.
+- **`POST /start_data`** -- the delivery-price snapshot for the finance score categories
+  (asset-keyed). `portfolio-roi` and the polymarket categories do not use it.
 
-## Adding a new evaluator
+## Adding a new category
 
-1. Add a feature in `src/nautilus-server/Cargo.toml` that enables the shared
-   `finance` machinery:
-
-```toml
-[features]
-my-evaluator = ["finance"]
-```
-
-2. Add the scorer in `src/nautilus-server/src/scoring/my_evaluator.rs` and a
-   `pub mod my_evaluator;` line in `scoring/mod.rs`. Implement the `Scorer` trait
-   (its `score` gets `start_price` + `end_price` in 1e-8 units) and set its
-   `category_id`.
-
-3. Add the app in `src/nautilus-server/src/apps/my-evaluator/mod.rs` (just
-   `CATEGORY_ID`, `IntentScope`, and `build_registry` — the handlers are shared
-   in `endpoints.rs`) plus an `allowed_endpoints.yaml`. Wire it into `lib.rs`
-   under `#[cfg(feature = "my-evaluator")]`.
-
-4. Make sure every asset the evaluator needs is in `src/asset.rs` (symbol → Pyth
-   feed id). The shared oracle resolves prices; the scorer only does the math.
-
-5. Register the enclave's HTTP URL in the Walrus `eval_engines` catalog (from the
-   `data/` package, after the gateway is running):
-
-```bash
-cd ../data
-EVALUATOR_ID=my-evaluator \
-ENCLAVE_URL=http://host:port \
-ENCLAVE_OBJECT_ID=0x... \   # optional in local dev
-npm run register-eval-engine
-```
-
-Do **not** add the URL to `.env` — the scheduler and competition engine load the
-catalog dynamically and refresh when the pointer advances.
+1. Finance score category: add the scorer in `src/scoring/<id>.rs` (implement the `Scorer` trait,
+   set its `category_id`), register it in `apps/finance/mod.rs::build_registry()`, add the id to
+   `SCORE_CATEGORIES`, and make sure every asset it needs is in `src/asset.rs`.
+2. Prediction category: add the constant + a `score_*` function in `apps/polymarket/`, add the id to
+   `PREDICTION_CATEGORIES`, and dispatch it in `process`.
+3. If the category needs a new outbound host, add it to `apps/evaluation/allowed_endpoints.yaml`.
+4. Register the new `evaluator_id` in the Walrus `eval_engines` catalog pointing at this one engine
+   URL (see below).
 
 ## Build, run, test
 
-There are exactly TWO engine builds, each serving every category in its class:
+One engine, one build. The `evaluation` feature is the default and is a no-op label kept only so the
+deterministic enclave build command keeps a stable shape.
 
-- `finance` — the three u8-score "guess" categories (`price-range-guess`,
-  `up-down-guess`, `movement-percentage-guess`) via the shared scoring registry,
-  AND the u64-metric `portfolio-roi`. `/process_data` + `/validate` dispatch by
-  `category_id`; only this engine has the delivery-price `/start_data` step.
-- `prediction` — the three `polymarket-*` categories (`polymarket-resolution`,
-  `polymarket-event`, `polymarket-price`); its Rust code lives in `apps/polymarket/`.
-
-Local development (runs anywhere, no AWS, fresh key per boot). Pick one engine:
+Local development (runs anywhere, no AWS, fresh key per boot):
 
 ```bash
 cd src/nautilus-server
-# finance on :3000 (default), prediction on :3001
-RUST_LOG=info cargo run --no-default-features --features finance
-PORT=3001 RUST_LOG=info cargo run --no-default-features --features prediction
-cargo test --no-default-features --features finance        # (or prediction)
+RUST_LOG=info cargo run                 # serves all categories on :3000 (PORT overrides)
+cargo test
 ```
 
 Enclave image and PCRs (needs an AWS Nitro capable host):
 
 ```bash
-make ENCLAVE_APP=finance      # or: make ENCLAVE_APP=prediction
-cat out/nitro.pcrs            # PCR0/1/2 are unique to this engine build
-make run-debug                # debug build, all-zero PCRs, for development only
+make ENCLAVE_APP=evaluation             # builds out/nitro.eif + out/nitro.pcrs
+cat out/nitro.pcrs                       # PCR0/1/2 for this engine build
+make run-debug                           # debug build, all-zero PCRs, for development only
 ```
 
-Because the scorers and the allow list are compiled into the image, each engine
-produces its own PCR set. Register those PCRs and the enclave public key onchain
-per ENGINE. The scheduler/competition route each `template.evaluator_id` to its
-engine URL via the eval-engines registry (all finance evaluator ids -> the
-finance engine, all `polymarket-*` -> the prediction engine), and each engine
-rejects categories outside its set as a backstop.
+`configure_enclave.sh evaluation` reads `src/nautilus-server/src/apps/evaluation/allowed_endpoints.yaml`
+and wires the vsock-proxy forwarders for Pyth Hermes and the two Polymarket hosts.
+
+## Register the engine
+
+There is one engine URL. Register every `evaluator_id` it serves to that same URL in the Walrus
+`eval_engines` catalog, from the `data/` package, after the gateway is running:
+
+```bash
+cd ../data
+for id in price-range-guess up-down-guess movement-percentage-guess portfolio-roi \
+          polymarket-resolution polymarket-event polymarket-price; do
+  EVALUATOR_ID=$id \
+  ENCLAVE_URL=http://host:port \
+  ENCLAVE_OBJECT_ID=0x... \   # optional in local dev
+  npm run register-eval-engine
+done
+```
+
+Do **not** add the URL to `.env` -- the scheduler and competition engine load the catalog
+dynamically and refresh when the pointer advances.

@@ -11,9 +11,13 @@
 //                          Brier closeness to the real CLOB price at that date.
 //
 // Like portfolio-roi this returns a SIGNED u8 score (record_score on-chain), so it has its own
-// handlers (NOT the shared finance endpoints.rs / Pyth oracle) and reuses only the shared job
-// envelope. Resolution/price that is not yet available returns a transient error so the engine
-// retries until it resolves. main.rs routes here under `--features polymarket`.
+// scoring (NOT the shared Pyth oracle) and reuses only the shared job envelope. Resolution/price
+// that is not yet available returns a transient error so the engine retries until it resolves.
+//
+// Both engines are now compiled into one binary. The top-level dispatcher (src/app.rs) peeks
+// payload.category_id and forwards the prediction categories here through the Value-based
+// validate_input / process_data below (the same shape the finance dispatcher uses), so the two
+// sub-engines compose without their handler names colliding.
 
 mod client;
 mod score;
@@ -24,8 +28,10 @@ use crate::AppState;
 use crate::EnclaveError;
 use axum::extract::State;
 use axum::Json;
+use fastcrypto::ed25519::Ed25519KeyPair;
 use score::Guess;
 use serde::{Deserialize, Serialize};
+use serde_json::Value;
 use serde_repr::{Deserialize_repr, Serialize_repr};
 use std::collections::{BTreeMap, BTreeSet};
 use std::sync::Arc;
@@ -34,6 +40,9 @@ use tracing::{info, warn};
 pub const CAT_RESOLUTION: &str = "polymarket-resolution";
 pub const CAT_EVENT: &str = "polymarket-event";
 pub const CAT_PRICE: &str = "polymarket-price";
+
+// The three prediction categories this engine owns; the top-level dispatcher routes these here.
+pub const PREDICTION_CATEGORIES: &[&str] = &[CAT_RESOLUTION, CAT_EVENT, CAT_PRICE];
 
 // All three return a u8 score, so they share the score evaluators' intent scope (Score = 0); the
 // engine verifies the signature as a score and records it with record_score.
@@ -44,7 +53,9 @@ pub enum IntentScope {
 }
 
 // The [start, end] window the competition engine supplies (epoch ms); informational here since
-// resolution is driven by the market state / target date, not the window.
+// resolution is driven by the market state / target date, not the window. Accepted for contract
+// completeness but not read during scoring.
+#[allow(dead_code)]
 #[derive(Debug, Default, Deserialize)]
 pub struct Window {
     #[serde(default)]
@@ -62,6 +73,7 @@ pub struct PredictionJob {
     #[serde(default)]
     pub params: BTreeMap<String, String>,
     #[serde(default)]
+    #[allow(dead_code)]
     pub window: Window,
 }
 
@@ -85,22 +97,37 @@ pub struct ValidateResponse {
     pub job_id: String,
 }
 
+// --- POST /validate (Value-based, dispatched here by src/app.rs) ------------
+// PredictionJob flattens JobEnvelope, so the top-level dispatcher peeks category_id first and only
+// then hands us the raw body to deserialize into the typed prediction job.
+pub async fn validate_input(Json(raw): Json<Value>) -> Result<Json<Value>, EnclaveError> {
+    let req: ProcessDataRequest<PredictionJob> = serde_json::from_value(raw).map_err(de_err)?;
+    let resp = validate(req.payload).await?;
+    Ok(Json(serde_json::to_value(resp).map_err(ser_err)?))
+}
+
+// --- POST /process_data (Value-based, dispatched here by src/app.rs) --------
+pub async fn process_data(
+    State(state): State<Arc<AppState>>,
+    Json(raw): Json<Value>,
+) -> Result<Json<Value>, EnclaveError> {
+    let req: ProcessDataRequest<PredictionJob> = serde_json::from_value(raw).map_err(de_err)?;
+    let signed = process(&state.eph_kp, req.payload).await?;
+    Ok(Json(serde_json::to_value(signed).map_err(ser_err)?))
+}
+
 // Input validation only (right category, on time, promised output shape).
-pub async fn validate_input(
-    Json(request): Json<ProcessDataRequest<PredictionJob>>,
-) -> Result<Json<ValidateResponse>, EnclaveError> {
-    let pjob = request.payload;
+async fn validate(pjob: PredictionJob) -> Result<ValidateResponse, EnclaveError> {
     ensure_prediction_category(&pjob.job)?;
     job::ensure_timely(&pjob.job).map_err(to_enclave_error)?;
     job::validate_output_schema(&pjob.job).map_err(to_enclave_error)?;
-    Ok(Json(ValidateResponse { valid: true, job_id: pjob.job.job_id }))
+    Ok(ValidateResponse { valid: true, job_id: pjob.job.job_id })
 }
 
-pub async fn process_data(
-    State(state): State<Arc<AppState>>,
-    Json(request): Json<ProcessDataRequest<PredictionJob>>,
-) -> Result<Json<ProcessedDataResponse<IntentMessage<ScoreResult>>>, EnclaveError> {
-    let pjob = request.payload;
+async fn process(
+    kp: &Ed25519KeyPair,
+    pjob: PredictionJob,
+) -> Result<ProcessedDataResponse<IntentMessage<ScoreResult>>, EnclaveError> {
     let job = &pjob.job;
     info!("polymarket job '{}' ({}) for agent '{}'", job.job_id, job.category_id, job.agent_id);
 
@@ -125,7 +152,7 @@ pub async fn process_data(
         score,
         finalized_price,
     };
-    Ok(Json(to_signed_response(&state.eph_kp, result, timestamp_ms, IntentScope::Score as u8)))
+    Ok(to_signed_response(kp, result, timestamp_ms, IntentScope::Score as u8))
 }
 
 // --- per-category scoring ---------------------------------------------------
@@ -210,6 +237,14 @@ async fn score_price(
 }
 
 // --- helpers ----------------------------------------------------------------
+
+fn de_err(e: serde_json::Error) -> EnclaveError {
+    EnclaveError::GenericError(format!("invalid request body for category: {e}"))
+}
+
+fn ser_err(e: serde_json::Error) -> EnclaveError {
+    EnclaveError::GenericError(format!("failed to serialize response: {e}"))
+}
 
 fn ensure_prediction_category(job: &JobEnvelope) -> Result<(), EnclaveError> {
     match job.category_id.as_str() {

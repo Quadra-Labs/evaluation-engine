@@ -9,37 +9,28 @@ use fastcrypto::ed25519::Ed25519KeyPair;
 use serde_json::json;
 use std::fmt;
 
-// Exactly one engine feature is enabled per build: `finance` (apps/finance — score categories +
-// portfolio-roi behind a category dispatcher) or `prediction` (apps/polymarket — the polymarket-*
-// categories). Each exposes process_data / validate_input (and finance also start_data).
+// One combined binary serves every category. Both sub-engines are compiled in: `finance`
+// (apps/finance — the score categories + portfolio-roi behind a category dispatcher) and
+// `prediction` (apps/polymarket — the polymarket-* categories). Each exposes Value-based
+// process_data / validate_input handlers; the top-level `app` dispatcher routes by category_id.
 mod apps {
-    #[cfg(feature = "finance")]
     #[path = "finance/mod.rs"]
     pub mod finance;
-    #[cfg(feature = "prediction")]
+    // Module name stays `prediction`; its code lives in apps/polymarket/.
     #[path = "polymarket/mod.rs"]
     pub mod prediction;
 }
 
-// The active engine's handlers (exactly one feature is enabled per build).
-pub mod app {
-    #[cfg(feature = "finance")]
-    pub use crate::apps::finance::*;
-    #[cfg(feature = "prediction")]
-    pub use crate::apps::prediction::*;
-}
+// The combined engine's HTTP handlers: a thin category dispatcher over both sub-engines.
+pub mod app;
 
 pub mod common;
 
-// The shared job envelope is used by both engines. The Pyth oracle, asset map, and scoring
-// registry are finance-only (the prediction engine has its own Polymarket client).
-#[cfg(any(feature = "finance", feature = "prediction"))]
-pub mod job;
-#[cfg(feature = "finance")]
+// The shared job envelope plus the finance machinery (Pyth oracle, asset map, scoring registry)
+// are always compiled now; the prediction side brings its own Polymarket client.
 pub mod asset;
-#[cfg(feature = "finance")]
+pub mod job;
 pub mod oracle;
-#[cfg(feature = "finance")]
 pub mod scoring;
 
 /// App state, at minimum needs to maintain the ephemeral keypair.

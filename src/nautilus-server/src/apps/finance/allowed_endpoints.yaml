@@ -1,4 +1,0 @@
-# The finance engine (score categories + portfolio-roi) resolves every price from Pyth Hermes,
-# so that host must be reachable. The enclave has no other outbound access.
-endpoints:
-  - hermes.pyth.network
