@@ -392,17 +392,20 @@ export function buildPortfolioCompetitionResult(
     // makes which assets those are deterministic and replayable rather than arrival-dependent.
     const covered = input.resolved.windows.slice(0, MAX_PROOFS);
     if (input.resolved.windows.length > MAX_PROOFS) {
-        log.warn('more assets than the settlement can pin on chain; the tail is TEE-attested only', {
-            competitionId: input.competitionId,
-            assets: input.resolved.windows.length,
-            maxProofs: MAX_PROOFS,
-            // Joined rather than passed as an array: the log context is a flat scalar map, and
-            // naming the assets is the whole value of the line.
-            uncovered: input.resolved.windows
-                .slice(MAX_PROOFS)
-                .map((w) => w.asset)
-                .join(','),
-        });
+        log.warn(
+            'more assets than the settlement can pin on chain; the tail is TEE-attested only',
+            {
+                competitionId: input.competitionId,
+                assets: input.resolved.windows.length,
+                maxProofs: MAX_PROOFS,
+                // Joined rather than passed as an array: the log context is a flat scalar map, and
+                // naming the assets is the whole value of the line.
+                uncovered: input.resolved.windows
+                    .slice(MAX_PROOFS)
+                    .map((w) => w.asset)
+                    .join(','),
+            },
+        );
     }
 
     const receipt: Receipt = {

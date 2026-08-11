@@ -30,6 +30,8 @@ import {
     type UnsignedJobSettlement,
 } from './score.js';
 import {
+    hasAnchorFeed,
+    makePriceCache,
     resolveForCompetition,
     resolveForJob,
     resolveForPortfolio,
@@ -109,6 +111,12 @@ function nowSecs(): number {
 }
 
 export function makeEngine(deps: EngineDeps): Engine {
+    // One memo for the life of the process. Every key names a finalized voting round, so the
+    // cached reading is immutable history rather than something that can go stale — what it buys
+    // is that a relayer retrying a settlement does not pay for the DA-layer round trips that
+    // already answered. See `makePriceCache`.
+    const priceCache = makePriceCache();
+
     function requireSigning(): SigningContext {
         if (!deps.signing) {
             throw new EngineError(
@@ -165,6 +173,7 @@ export function makeEngine(deps: EngineDeps): Engine {
             params: intake.params,
             paidAtSecs: intake.paidAtSecs,
             lifetimeEndSecs: Number(job.lifetimeEnd),
+            cache: priceCache,
         });
 
         return buildJobResult({
@@ -242,21 +251,61 @@ export function makeEngine(deps: EngineDeps): Engine {
         // A PERFORMANCE competition takes a different route entirely: a price pair per asset
         // rather than one, a uint64 metric rather than a [0,100] score, and no Passport record.
         if (evaluatorTier(competition.evaluatorId).tier === 'portfolio') {
+            // AN UNPRICEABLE ASSET IS THE ENTRANT'S FAULT, NOT THE COMPETITION'S.
+            //
+            // The asset union used to be built across every entrant and handed straight to
+            // `resolveForPortfolio`, which throws on anything with no FTSO anchor feed. So one
+            // address sealing a portfolio that named DOGE made the WHOLE settlement throw — an
+            // `upstream` error a relayer retries forever, on a competition that can never resolve,
+            // with every other entrant's stake and the seeded prize locked behind it until the
+            // cancel window opens three days later. Sealing it costs the attacker one stake.
+            //
+            // Rejecting per ENTRANT instead is the same rule this engine already applies to a
+            // submission that will not decrypt or will not parse: the settlement proceeds and the
+            // author of the bad entry carries the consequence alone. Their assets stay out of the
+            // union entirely — they cannot be valued anyway — so a hostile entrant cannot even make
+            // everyone else pay for extra DA-layer round trips.
             const assets = new Set<string>();
+            let unparseable = 0;
+            let unpriceable = 0;
             for (const entry of entries) {
                 const submission = parsePortfolioSubmission(entry.revealed);
-                if ('ok' in submission && submission.ok === false) continue;
-                for (const asset of assetsOf(submission as PortfolioSubmission)) assets.add(asset);
+                if ('ok' in submission && submission.ok === false) {
+                    unparseable++;
+                    continue;
+                }
+                const named = assetsOf(submission as PortfolioSubmission);
+                const unknown = named.filter((asset) => !hasAnchorFeed(asset));
+                if (unknown.length > 0) {
+                    unpriceable++;
+                    log.warn('excluding an entrant that named an asset with no FTSO anchor feed', {
+                        competitionId,
+                        agent: entry.agent,
+                        assets: unknown.join(','),
+                        note: 'it scores the flat baseline; the settlement proceeds without it',
+                    });
+                    continue;
+                }
+                for (const asset of named) assets.add(asset);
             }
             if (assets.size === 0) {
-                throw tooEarly(
-                    `competition ${competitionId} has no readable portfolio to value yet`,
+                // TERMINAL, not too-early. `submitSealed` reverts `NotOpen` once `resolveAt` has
+                // passed and this branch is only reached after it has, so the entry set is final:
+                // no later attempt sees anything different. Retrying is the one thing that cannot
+                // help, and the remedy — `cancel` after CANCEL_WINDOW, then each agent withdraws
+                // its own stake — needs someone to be told rather than a keeper to keep trying.
+                throw terminal(
+                    `competition ${competitionId} has no valuable portfolio: ${unparseable} of ` +
+                        `${entries.length} entrants did not parse and ${unpriceable} named an asset ` +
+                        `with no FTSO anchor feed. Submissions closed at resolveAt, so this cannot ` +
+                        `change — cancel the competition to release the stakes.`,
                 );
             }
             const resolved = await resolveForPortfolio(deps.policy, {
                 evaluatorId: competition.evaluatorId,
                 assets: [...assets],
                 resolveAtSecs: Number(competition.resolveAt),
+                cache: priceCache,
             });
             return buildPortfolioCompetitionResult({
                 competitionId,
@@ -271,6 +320,7 @@ export function makeEngine(deps: EngineDeps): Engine {
         const window = await resolveForCompetition(deps.policy, {
             evaluatorId: competition.evaluatorId,
             resolveAtSecs: Number(competition.resolveAt),
+            cache: priceCache,
         });
 
         return buildCompetitionResult({

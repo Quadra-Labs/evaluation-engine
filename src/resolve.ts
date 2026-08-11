@@ -43,6 +43,64 @@ export interface ResolvedWindow {
     readonly lifetimeSecs: number;
 }
 
+/** Whether this build can price an asset at all, i.e. whether an FTSO anchor feed covers it. */
+export function hasAnchorFeed(asset: string): boolean {
+    return isFeedSymbol(`${asset.toUpperCase()}/USD`);
+}
+
+/**
+ * Ceiling on the distinct assets one settlement will price.
+ *
+ * Each asset costs TWO sequential DA-layer round trips, so this is the number that bounds how long
+ * a settlement can take and how much of a rate-limited public endpoint it consumes.
+ *
+ * IT CANNOT FIRE TODAY and that is deliberate. `FEED_IDS` carries five symbols and an asset outside
+ * it is refused one layer up, so the union is already bounded by the feed table — the operative
+ * bound is 5, which is why the request count was never actually the live half of BUGS.md 31. This
+ * exists so that a feed table which grows to fifty does not silently turn one settlement into a
+ * hundred sequential requests. Over the cap the tail is dropped in SORTED order, so which assets go
+ * unpriced is deterministic and replayable rather than arrival-dependent, and an entrant holding one
+ * of them scores the flat baseline exactly as an unparseable submission does.
+ */
+export const MAX_PORTFOLIO_ASSETS = 16;
+
+/**
+ * A memo over resolved windows, for the life of one engine process.
+ *
+ * The point is RETRIES. A settlement that fails on the tenth asset — a DA-layer blip, a revert
+ * relaying the result, a restarted relayer — otherwise re-fetches the nine that already answered,
+ * and each of those is two rate-limited round trips.
+ *
+ * Caching is safe here for a reason worth stating rather than assuming: every key names a
+ * FINALIZED voting round, and a finalized round's reading is immutable history. There is no
+ * staleness to expire, so there is no TTL. What is bounded is memory: oldest-first eviction at
+ * `maxEntries`, which is a plain FIFO because a settlement reads each key once and the access
+ * pattern gives an LRU nothing to work with.
+ */
+export interface PriceCache {
+    get(key: string): ResolvedWindow | undefined;
+    set(key: string, value: ResolvedWindow): void;
+    readonly size: number;
+}
+
+export function makePriceCache(maxEntries = 128): PriceCache {
+    const entries = new Map<string, ResolvedWindow>();
+    return {
+        get: (key) => entries.get(key),
+        set(key, value) {
+            if (entries.has(key)) return;
+            if (entries.size >= maxEntries) {
+                const oldest = entries.keys().next();
+                if (!oldest.done) entries.delete(oldest.value);
+            }
+            entries.set(key, value);
+        },
+        get size() {
+            return entries.size;
+        },
+    };
+}
+
 export interface ResolvePolicy {
     readonly daBaseUrl: string;
     readonly daApiKey: string | undefined;
@@ -101,6 +159,30 @@ function makeConfig(policy: ResolvePolicy, warnOnFallback: boolean): ResolveConf
 }
 
 /**
+ * `resolveInputs`, through the cache when one is supplied.
+ *
+ * The key is exactly the inputs `resolveInputs` is a pure function of — the same evaluator, asset,
+ * instant and window resolve the same voting rounds, and a finalized round answers the same reading
+ * forever. `daBaseUrl` and the epoch geometry are not in the key because they are fixed for the life
+ * of a `ResolvePolicy`, and a cache is only ever handed to one engine.
+ */
+async function resolveCached(
+    config: ResolveConfig,
+    cache: PriceCache | undefined,
+    evaluatorId: string,
+    resolveAtSecs: number,
+    asset?: string,
+    windowSecs?: number,
+): Promise<ResolvedWindow> {
+    const key = `${evaluatorId}|${asset ?? ''}|${resolveAtSecs}|${windowSecs ?? ''}`;
+    const hit = cache?.get(key);
+    if (hit) return hit;
+    const resolved = await resolveInputs(config, evaluatorId, resolveAtSecs, asset, windowSecs);
+    cache?.set(key, resolved);
+    return resolved;
+}
+
+/**
  * A paid job's window. `params` and `paidAtSecs` both come from the `JobPaid` log, so neither the
  * agent nor the relayer asking for the score has any say in what it is measured against.
  */
@@ -111,6 +193,7 @@ export async function resolveForJob(
         readonly params: Hex;
         readonly paidAtSecs: number;
         readonly lifetimeEndSecs: number;
+        readonly cache?: PriceCache | undefined;
     },
 ): Promise<ResolvedWindow> {
     const asset = jobAsset(args.params);
@@ -123,8 +206,9 @@ export async function resolveForJob(
     }
     // A job DOES name its asset, so a fallback here would be a real defect rather than a contract
     // limitation — warn on it.
-    return resolveInputs(
+    return resolveCached(
         makeConfig(policy, true),
+        args.cache,
         args.evaluatorId,
         args.lifetimeEndSecs,
         asset,
@@ -139,9 +223,18 @@ export async function resolveForJob(
  */
 export async function resolveForCompetition(
     policy: ResolvePolicy,
-    args: { readonly evaluatorId: string; readonly resolveAtSecs: number },
+    args: {
+        readonly evaluatorId: string;
+        readonly resolveAtSecs: number;
+        readonly cache?: PriceCache | undefined;
+    },
 ): Promise<ResolvedWindow> {
-    return resolveInputs(makeConfig(policy, true), args.evaluatorId, args.resolveAtSecs);
+    return resolveCached(
+        makeConfig(policy, true),
+        args.cache,
+        args.evaluatorId,
+        args.resolveAtSecs,
+    );
 }
 
 export interface ResolvedPortfolio {
@@ -173,12 +266,19 @@ export interface ResolvedPortfolio {
  * Every price pair a portfolio needs.
  *
  * Two DA-layer calls per asset, sequentially. Concurrency would be faster and is deliberately not
- * used: the DA layer is rate limited, a portfolio can name a dozen assets, and a settlement that
- * gets throttled halfway through is worse than one that takes a few more seconds.
+ * used: the DA layer is rate limited, and a settlement that gets throttled halfway through is worse
+ * than one that takes a few more seconds. What bounds the total is `MAX_PORTFOLIO_ASSETS` above,
+ * plus the memo, which is what stops a retry from paying for the whole set again.
  *
- * An asset with no anchor feed is a hard failure rather than a fallback. `resolveInputs` would
- * otherwise price an unknown asset with DEFAULT_FEED, which means valuing someone's DOGE position
- * at the BTC price and signing the result.
+ * An asset with no anchor feed is still a hard failure here, but it is now an INVARIANT rather than
+ * a policy: the caller has already excluded any entrant naming one (see `engine.ts`), so reaching
+ * this throw means a bug in that filter, not a hostile submission. It stays because the alternative
+ * is worse — `resolveInputs` would price an unknown asset with DEFAULT_FEED, which means valuing
+ * someone's DOGE position at the BTC price and signing the result.
+ *
+ * Before BUGS.md 31 this throw WAS the policy, and it made settlement liveness an entrant's choice:
+ * one address sealing a portfolio that named DOGE took the whole competition down with it, forever,
+ * with the relayer retrying an error that could never clear.
  */
 export async function resolveForPortfolio(
     policy: ResolvePolicy,
@@ -187,18 +287,29 @@ export async function resolveForPortfolio(
         readonly assets: readonly string[];
         readonly resolveAtSecs: number;
         readonly windowSecs?: number | undefined;
+        readonly cache?: PriceCache | undefined;
     },
 ): Promise<ResolvedPortfolio> {
-    const sorted = [...new Set(args.assets)].sort();
-    if (sorted.length === 0) throw new Error('a portfolio names no assets');
+    const distinct = [...new Set(args.assets)].sort();
+    if (distinct.length === 0) throw new Error('a portfolio names no assets');
 
-    for (const asset of sorted) {
-        if (!isFeedSymbol(`${asset}/USD`)) {
+    for (const asset of distinct) {
+        if (!hasAnchorFeed(asset)) {
             throw new Error(
                 `no FTSO anchor feed for "${asset}" — this build knows ` +
                     `${Object.keys(FEED_IDS).join(', ')}`,
             );
         }
+    }
+
+    const sorted = distinct.slice(0, MAX_PORTFOLIO_ASSETS);
+    if (distinct.length > sorted.length) {
+        log.warn('more distinct assets than one settlement will price; the tail goes unvalued', {
+            evaluatorId: args.evaluatorId,
+            assets: distinct.length,
+            maxAssets: MAX_PORTFOLIO_ASSETS,
+            unpriced: distinct.slice(MAX_PORTFOLIO_ASSETS).join(','),
+        });
     }
 
     // No fallback warning: an unknown asset already threw above, so the config can never fall back.
@@ -208,8 +319,9 @@ export async function resolveForPortfolio(
     const windows: { asset: string; window: ResolvedWindow }[] = [];
 
     for (const asset of sorted) {
-        const resolved = await resolveInputs(
+        const resolved = await resolveCached(
             config,
+            args.cache,
             args.evaluatorId,
             args.resolveAtSecs,
             asset,

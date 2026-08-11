@@ -27,14 +27,30 @@
  *   and verified on chain; it simply cannot be recomputed by a stranger. Putting it in the scorer
  *   registry would make the verifier report it as replayable and then fail to replay it.
  *
- * ONE HONEST LIMITATION. The settlement carries a single `groundTruthValue` and a single FTSO
- * proof, so the on-chain oracle cross-check covers ONE of the portfolio's assets. The rest are
- * attested by the TEE signature alone. That is weaker than the price evaluators and is stated in
- * the README rather than hidden.
+ * WHAT THE CHAIN RE-VERIFIES. Every leg of the portfolio carries its own `(feedId, value, proof)`
+ * triple in the settlement, up to `SealedCompetition.MAX_PROOFS`, and `FtsoLib.checkGroundTruths`
+ * cross-checks each one against the FTSO anchor feed it names (BUGS.md 27). Past that cap the tail
+ * is still PRICED — it just is not re-verified on chain, so those legs rest on the TEE signature
+ * alone. With five feeds in the table and a cap of ten, that cannot happen today.
  */
 
 /** Zero-ROI baseline. MUST equal `SealedCompetition.PERF_BASE`. */
 export const PERF_BASE = 1_000_000n;
+
+/**
+ * Abuse bounds on one submission, not working bounds.
+ *
+ * A legitimate portfolio names at most as many assets as this build has feeds — five — so these
+ * caps are two orders of magnitude clear of anything honest. They exist because the parser walks
+ * every key and every trade, and the submission arrives as a decrypted blob whose only other limit
+ * is what fit in a transaction. Same discipline as the payload bound in BUGS.md 34: bound the
+ * abuse, and pin that the real thing sits far below the cap.
+ *
+ * Breaching either is an AGENT FAULT, which for this evaluator means the flat baseline and a
+ * recorded reason — never a refusal to settle, which would hand one entrant everyone else's payout.
+ */
+export const MAX_POSITIONS = 64;
+export const MAX_TRADES = 128;
 
 export interface Trade {
     readonly from: string;
@@ -90,8 +106,15 @@ export function parsePortfolioSubmission(
         return fault('"portfolioStart" must be a JSON object of asset to USD');
     }
 
+    const startEntries = Object.entries(startJson as Record<string, unknown>);
+    if (startEntries.length > MAX_POSITIONS) {
+        return fault(
+            `"portfolioStart" names ${startEntries.length} assets, over the ${MAX_POSITIONS} cap`,
+        );
+    }
+
     const start = new Map<string, bigint>();
-    for (const [asset, value] of Object.entries(startJson as Record<string, unknown>)) {
+    for (const [asset, value] of startEntries) {
         const usd = asBigInt(value);
         if (usd === undefined) return fault(`allocation for "${asset}" is not an integer`);
         if (usd < 0n) return fault(`allocation for "${asset}" is negative`);
@@ -105,6 +128,9 @@ export function parsePortfolioSubmission(
         return fault('"trades" is not a JSON array');
     }
     if (!Array.isArray(tradesJson)) return fault('"trades" must be a JSON array');
+    if (tradesJson.length > MAX_TRADES) {
+        return fault(`"trades" carries ${tradesJson.length} entries, over the ${MAX_TRADES} cap`);
+    }
 
     const trades: Trade[] = [];
     for (const raw of tradesJson) {

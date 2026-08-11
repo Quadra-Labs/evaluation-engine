@@ -39,8 +39,11 @@ before settlement. And the scoring itself — the enclave sees plaintext, the ch
 3. Anyone who runs the same public image in their own Confidential Space project can mint a valid
    token for their own enclave. Not a confidentiality break — their enclave runs this code — but a
    griefing surface, closed by pinning `VTPM_SUB_PREFIX` to your GCP project.
-4. `portfolio-roi` settlements pin only one of a portfolio's feeds; the rest rest on the TEE
-   signature alone.
+4. A `portfolio-roi` settlement pins every leg of the portfolio — one FTSO feed id, value and
+   Merkle proof each, all inside the signature — up to `SealedCompetition.MAX_PROOFS` (10). Past
+   that cap the tail is still priced but not re-verified on chain. With five feeds in the table it
+   cannot be reached today. An entrant naming an asset with no anchor feed cannot be valued at all
+   and scores the flat baseline; the competition still settles for everyone else.
 
 **Why this needs confidential compute rather than a smart contract.** The product is a market for
 forecasts, and a forecast is worth nothing once everyone can read it. On a public chain the scoring

@@ -16,8 +16,8 @@
  *
  *   PORTFOLIO  portfolio-roi.
  *              A uint64 metric around 1e6, which fits `EntryInput.score` and `KIND_PERFORMANCE`
- *              but NOT `scoreJob`'s uint8 — so competitions only. The settlement pins ONE of the
- *              portfolio's feeds; the rest rest on the TEE signature alone.
+ *              but NOT `scoreJob`'s uint8 — so competitions only. The settlement pins EVERY leg
+ *              of the portfolio, one `(feedId, value, proof)` triple each, up to `MAX_PROOFS`.
  *
  *   MARKET     polymarket-resolution, polymarket-event, polymarket-price.
  *              Scoreable and NOT settleable. A Polymarket outcome has no FTSO feed, so there is
@@ -175,7 +175,14 @@ export async function scoreMarket(args: MarketScoreArgs): Promise<number> {
     }
 }
 
-export { computeMetric, parsePortfolioSubmission, assetsOf, PERF_BASE } from './portfolioRoi.js';
+export {
+    computeMetric,
+    parsePortfolioSubmission,
+    assetsOf,
+    PERF_BASE,
+    MAX_POSITIONS,
+    MAX_TRADES,
+} from './portfolioRoi.js';
 export type { PortfolioSubmission, PortfolioVerdict, Trade } from './portfolioRoi.js';
 export {
     fetchMarket,

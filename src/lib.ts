@@ -85,8 +85,14 @@ export {
 export {
     resolveForJob,
     resolveForCompetition,
+    resolveForPortfolio,
     feedFromEvaluatorId,
+    hasAnchorFeed,
+    makePriceCache,
+    MAX_PORTFOLIO_ASSETS,
+    type PriceCache,
     type ResolvePolicy,
+    type ResolvedPortfolio,
     type ResolvedWindow,
 } from './resolve.js';
 
@@ -101,6 +107,8 @@ export {
     parsePortfolioSubmission,
     assetsOf,
     PERF_BASE as PORTFOLIO_PERF_BASE,
+    MAX_POSITIONS,
+    MAX_TRADES,
     PORTFOLIO_EVALUATOR,
     POLYMARKET_EVALUATORS,
     fetchMarket,
