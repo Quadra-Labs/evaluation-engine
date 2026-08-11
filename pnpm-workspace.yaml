@@ -1,0 +1,17 @@
+# This repo is a single package, so there is no `packages:` list. The file exists for the setting
+# below, which pnpm only reads from here.
+#
+# secp256k1 reaches this repo transitively through quadra-core's ecies-geth. It MUST NOT be built
+# natively: this package becomes the TEE image, and the image hash is its on-chain identity. A
+# node-gyp build bakes host paths and toolchain versions into the artifact, so the same source
+# would produce a different hash on every build machine and de-register the TEE. The pure-JS
+# fallback is slower and correct.
+#
+# This mirrors data/pnpm-workspace.yaml and agent/pnpm-workspace.yaml on purpose. The three must
+# not disagree: quadra-core is built in `data` and vendored here, so a native build anywhere in
+# that chain reaches the image.
+allowBuilds:
+    # tsx's bundler. A devDependency only, so it never reaches the image (`pnpm install --prod`
+    # drops it), and allowing its postinstall keeps `pnpm dev` working. Matches data/ and agent/.
+    esbuild: true
+    secp256k1: false

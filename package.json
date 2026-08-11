@@ -1,0 +1,51 @@
+{
+    "name": "quadra-evaluation-engine",
+    "version": "1.0.0",
+    "description": "The only Quadra workload that runs inside a TEE: it decrypts sealed agent submissions, resolves ground truth from Flare's FTSO anchor feeds, scores, and signs a settlement the markets verify on chain.",
+    "license": "Apache-2.0",
+    "private": true,
+    "type": "module",
+    "main": "./dist/lib.js",
+    "types": "./dist/lib.d.ts",
+    "exports": {
+        ".": {
+            "types": "./dist/lib.d.ts",
+            "import": "./dist/lib.js"
+        }
+    },
+    "files": [
+        "dist"
+    ],
+    "scripts": {
+        "build": "tsc",
+        "typecheck": "tsc --noEmit",
+        "dev": "tsx src/main.ts",
+        "dev:fcc": "tsx src/fcc/main.ts",
+        "register-tee": "tsx src/cli/registerTee.ts",
+        "self-register": "tsx src/cli/selfRegister.ts",
+        "sync-jwks": "tsx src/cli/syncJwks.ts",
+        "vendor:core": "bash scripts/vendor-core.sh",
+        "format": "prettier --write .",
+        "format:check": "prettier --check ."
+    },
+    "keywords": [
+        "quadra",
+        "flare",
+        "tee",
+        "confidential-compute",
+        "coston2"
+    ],
+    "engines": {
+        "node": ">=20.12"
+    },
+    "dependencies": {
+        "quadra-core": "file:vendor/quadra-core-1.0.0.tgz",
+        "viem": "^2.21.0"
+    },
+    "devDependencies": {
+        "@types/node": "^22.10.2",
+        "prettier": "^3.4.0",
+        "tsx": "^4.19.2",
+        "typescript": "^5.7.2"
+    }
+}

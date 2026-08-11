@@ -1,0 +1,7 @@
+# pnpm owns this file's formatting and rewrites it on every install.
+pnpm-lock.yaml
+
+# Build output, dependencies and the vendored trust core.
+dist/
+node_modules/
+vendor/

@@ -1,12 +1,34 @@
-*.env
-user-data.sh
-trust-policy.json
-secrets-policy.json
+# Dependencies and build output
+node_modules/
+dist/
+*.tsbuildinfo
 
-/move/enclave/build
-/move/*/build
+# Secrets. TEE_PRIVATE_KEY and the deployer key both land in .env, and neither may ever be
+# committed: the first IS the enclave identity on the dev path, the second owns every contract.
+.env
+.env.*
+!.env.example
 
-/src/nautilus-server/target
+# The ext-proxy's Coston2 indexer database credentials, obtained from Flare support. The .example
+# is tracked; the real file is not.
+config/proxy/*.toml
+!config/proxy/*.toml.example
 
-/out
-/target
+# Local-only working tests. Repo policy: tests are working tools, never committed and never wired
+# into package.json. See data/ and agent/, which track none either.
+test/
+
+# Logs
+*.log
+npm-debug.log*
+pnpm-debug.log*
+
+# OS / editor
+.DS_Store
+Thumbs.db
+.idea/
+.vscode/
+
+# Local tooling
+.claude/
+.agents/
