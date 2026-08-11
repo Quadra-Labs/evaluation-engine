@@ -1,0 +1,105 @@
+# The GCP Confidential Space workload image.
+#
+# This is the REAL TEE image: one container, running alone inside an AMD SEV-SNP confidential VM,
+# holding the only copy of the settlement key. It is distinct from `Dockerfile.fcc`, which packages
+# the same workload as a Flare Compute Extension alongside Flare's TEE node. Both are real TEEs;
+# they differ in who verifies the attestation. Here our own `ConfidentialSpaceVerifier` does, on
+# chain. There, Flare's data-provider consensus does.
+#
+# THE IMAGE DIGEST IS THE ON-CHAIN IDENTITY. `TeeRegistry.expectedImageDigest` pins it, and
+# `register` binds a key only if the attestation says the enclave is running THIS image. Two
+# consequences that make the build fussy on purpose:
+#
+#   - A tag is not an identity. Push, then read back the immutable `sha256:` digest and pin THAT.
+#     `deploy/gcp/build-push.sh` prints it.
+#   - Reproducibility is what lets anyone else confirm the digest corresponds to this source.
+#     SOURCE_DATE_EPOCH, the Debian snapshot pin and the final mtime normalization are all in
+#     service of that. Base images are still referenced by tag — pin them by digest before a
+#     submission build (BUGS.md 24).
+#
+# The container talks to exactly three things: the Coston2 RPC, Flare's DA layer, and the local
+# Confidential Space launcher socket that mints attestation tokens. It accepts inbound HTTP on
+# TEE_PORT so a relayer can ask it for a signed settlement.
+
+ARG SOURCE_DATE_EPOCH=1735689600
+
+# --- build ---------------------------------------------------------------------------------------
+# UNPINNED — pin by digest before a submission build. See the note above and BUGS.md 24:
+#   docker pull node:22-trixie && docker inspect --format='{{index .RepoDigests 0}}' node:22-trixie
+FROM node:22-trixie AS builder
+
+ARG SOURCE_DATE_EPOCH
+ENV SOURCE_DATE_EPOCH=${SOURCE_DATE_EPOCH}
+
+WORKDIR /build
+
+# Dependency closure first, so a source-only edit does not re-resolve it. `vendor/` carries
+# quadra-core as a pinned tarball rather than a path into a sibling repo, which is what makes the
+# trust core part of THIS image's reviewable content.
+COPY package.json pnpm-lock.yaml pnpm-workspace.yaml ./
+COPY vendor ./vendor
+
+RUN corepack enable \
+    && corepack prepare pnpm@11.8.0 --activate \
+    && pnpm install --frozen-lockfile
+
+COPY tsconfig.json ./
+COPY src ./src
+RUN pnpm build
+
+# Drop tsx, typescript and prettier. Every build-time package left in a measured image is
+# dependency surface that has to be justified and re-attested when it moves.
+RUN pnpm prune --prod
+
+# --- runtime -------------------------------------------------------------------------------------
+# UNPINNED — see above.
+FROM debian:trixie-slim AS runtime
+
+ARG SOURCE_DATE_EPOCH
+ENV SOURCE_DATE_EPOCH=${SOURCE_DATE_EPOCH}
+ENV DEBIAN_FRONTEND=noninteractive
+
+# Pin apt to the Debian snapshot for SOURCE_DATE_EPOCH so the package set is fixed in time and a
+# rebuild six months from now installs the same bytes.
+RUN set -eux; \
+    snapshot="$(date -u -d "@${SOURCE_DATE_EPOCH}" +%Y%m%dT%H%M%SZ)"; \
+    printf 'deb [check-valid-until=no] https://snapshot.debian.org/archive/debian/%s trixie main\n' "$snapshot" \
+        > /etc/apt/sources.list.d/snapshot.list; \
+    rm -f /etc/apt/sources.list /etc/apt/sources.list.d/debian.sources; \
+    apt-get -o Acquire::Check-Valid-Until=false update; \
+    apt-get install -y --no-install-recommends ca-certificates nodejs; \
+    apt-get clean; \
+    rm -rf /var/lib/apt/lists/*
+
+WORKDIR /app
+
+COPY --from=builder /build/dist /app/dist
+COPY --from=builder /build/node_modules /app/node_modules
+COPY --from=builder /build/package.json /app/package.json
+
+# Production defaults. SIMULATE_ATTESTATION=false is the switch that makes `keys.ts` REFUSE a
+# TEE_PRIVATE_KEY: in here the key is generated inside the enclave and never leaves, and a key
+# supplied from outside would make the product's central claim false.
+ENV NODE_ENV=production \
+    SIMULATE_ATTESTATION=false \
+    TEE_PORT=3000 \
+    LOG_LEVEL=info
+
+# Confidential Space refuses any `tee-env-*` metadata override for a variable not named here, and
+# it refuses SILENTLY from the operator's point of view — the container just starts with the baked
+# value. Every variable the VM is expected to configure must appear.
+#
+# TEE_PRIVATE_KEY is deliberately ABSENT, and that absence is a security control: even an operator
+# who edits the VM's metadata cannot inject a key into the enclave.
+LABEL "tee.launch_policy.allow_env_override"="CHAIN_ID,CHAIN_RPC_URL,JOB_ESCROW,SEALED_COMPETITION,TEE_REGISTRY,FROM_BLOCK,DA_URL,DA_API_KEY,DEFAULT_FEED,DEFAULT_LIFETIME_SECS,TEE_PORT,LOG_LEVEL,HTTP_TIMEOUT_MS,HTTP_MAX_BYTES,TEE_IMAGE_DIGEST"
+
+# Ship stdout/stderr to Cloud Logging. Without it a production Confidential Space VM is completely
+# opaque — no SSH, no console — and the first failed boot is unexplainable.
+LABEL "tee.launch_policy.log_redirect"="always"
+
+# Normalize every mtime LAST: npm, tar and the layer digest all record them.
+RUN find /app -exec touch -h -d "@${SOURCE_DATE_EPOCH}" {} +
+
+EXPOSE 3000
+
+CMD ["node", "/app/dist/main.js"]

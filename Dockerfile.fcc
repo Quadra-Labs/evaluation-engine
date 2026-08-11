@@ -1,0 +1,112 @@
+# The FCC extension image.
+#
+# THIS IMAGE'S HASH IS ITS ON-CHAIN IDENTITY. Flare's `allow-tee-version` whitelists a code hash
+# for an extension, and a TEE machine proves it runs that hash through attestation. So a build that
+# is not reproducible does not merely inconvenience a release — it de-registers the TEE. Every
+# choice below that looks fussy is in service of the same digest coming out of two different
+# machines:
+#
+#   - Base images must be pinned by DIGEST, not by tag, because tags move. THEY ARE NOT PINNED
+#     YET — see the note on the builder stage and BUGS.md 24.
+#   - apt is pinned to a Debian SNAPSHOT derived from SOURCE_DATE_EPOCH, so the same date installs
+#     the same package versions forever.
+#   - Every mtime is normalized as the LAST step, because npm and tar both record them.
+#   - `secp256k1` is never built natively (see pnpm-workspace.yaml). A node-gyp build bakes host
+#     paths and toolchain versions into the artifact.
+#   - quadra-core arrives as a VENDORED TARBALL in vendor/, not from a sibling checkout, so the
+#     trust core in the image is a specific reviewable blob rather than whatever ../data holds.
+#
+# Two processes run, joined by `wait -n`: Flare's TEE node (`server`, which owns the key and serves
+# /decrypt) and this extension. If either dies the container exits, because an extension whose node
+# is gone answers nothing while still looking alive.
+
+ARG TEE_NODE_REF=latest
+ARG SOURCE_DATE_EPOCH=1735689600
+
+# --- stage 1: Flare's TEE node ------------------------------------------------------------------
+# Built by the fce-extension-scaffold (`./scripts/start-services.sh` builds it locally). It carries
+# the `server` binary and the Confidential Space root certificate.
+FROM local/tee-node-base:${TEE_NODE_REF} AS tee-node
+
+# --- stage 2: build the extension ---------------------------------------------------------------
+# UNPINNED. Both base images below are referenced by TAG, and tags move — so this image is NOT yet
+# reproducible and its code hash is not yet stable. Pin both by digest before running
+# `allow-tee-version`, or the registered hash stops matching the next time a base image is
+# rebuilt and the TEE silently de-registers:
+#
+#   docker pull node:22-trixie && docker inspect --format='{{index .RepoDigests 0}}' node:22-trixie
+#   docker pull debian:trixie-slim && docker inspect --format='{{index .RepoDigests 0}}' debian:trixie-slim
+#
+# Recorded as BUGS.md 24. Do not paste a digest here that you have not resolved yourself: one that
+# looks pinned and is wrong is worse than a tag, because nothing will tell you.
+FROM node:22-trixie AS builder
+
+ARG SOURCE_DATE_EPOCH
+ENV SOURCE_DATE_EPOCH=${SOURCE_DATE_EPOCH}
+
+WORKDIR /build
+
+# The dependency closure first, so a source-only change does not re-resolve it.
+COPY package.json pnpm-lock.yaml pnpm-workspace.yaml ./
+COPY vendor ./vendor
+
+RUN corepack enable \
+    && corepack prepare pnpm@11.8.0 --activate \
+    && pnpm install --frozen-lockfile
+
+COPY tsconfig.json ./
+COPY src ./src
+RUN pnpm build
+
+# Prune to runtime dependencies only. tsx, typescript and prettier are build-time and every one of
+# them left behind is dependency surface inside a measured image.
+RUN pnpm prune --prod
+
+# --- stage 3: runtime ---------------------------------------------------------------------------
+# UNPINNED — see the note on the builder stage above.
+FROM debian:trixie-slim AS runtime
+
+ARG SOURCE_DATE_EPOCH
+ENV SOURCE_DATE_EPOCH=${SOURCE_DATE_EPOCH}
+ENV DEBIAN_FRONTEND=noninteractive
+
+# Pin apt to the Debian snapshot for SOURCE_DATE_EPOCH so the package set is fixed in time.
+RUN set -eux; \
+    snapshot="$(date -u -d "@${SOURCE_DATE_EPOCH}" +%Y%m%dT%H%M%SZ)"; \
+    printf 'deb [check-valid-until=no] https://snapshot.debian.org/archive/debian/%s trixie main\n' "$snapshot" \
+        > /etc/apt/sources.list.d/snapshot.list; \
+    rm -f /etc/apt/sources.list /etc/apt/sources.list.d/debian.sources; \
+    apt-get -o Acquire::Check-Valid-Until=false update; \
+    apt-get install -y --no-install-recommends ca-certificates bash nodejs; \
+    apt-get clean; \
+    rm -rf /var/lib/apt/lists/*
+
+WORKDIR /app
+
+COPY --from=tee-node /app/server /app/server
+COPY --from=tee-node /app/google_confidential_space_root.crt /app/google_confidential_space_root.crt
+
+COPY --from=builder /build/dist /app/extension/dist
+COPY --from=builder /build/node_modules /app/extension/node_modules
+COPY --from=builder /build/package.json /app/extension/package.json
+
+# MODE=1 pairs with SIMULATED_TEE=true in the scaffold's .env. A mismatch between the two surfaces
+# as "code hashes do not match", which reads like a build problem and is a configuration one.
+# Production on a real Confidential Space VM is MODE=0.
+ENV MODE=1 \
+    CONFIG_PORT=5501 \
+    SIGN_PORT=7701 \
+    EXTENSION_PORT=7702 \
+    NODE_ENV=production
+
+# Flare's launcher refuses to pass through any variable not named here, so an omission is not a
+# warning — the container starts with the value baked above and silently ignores the override.
+LABEL "tee.launch_policy.allow_env_override"="LOG_LEVEL,PROXY_URL,INITIAL_OWNER,EXTENSION_ID,CHAIN_URL,CHAIN_RPC_URL,CHAIN_ID,MODE,CONFIG_PORT,SIGN_PORT,EXTENSION_PORT,JOB_ESCROW,SEALED_COMPETITION,TEE_REGISTRY,DA_URL,DA_API_KEY,DEFAULT_FEED,DEFAULT_LIFETIME_SECS,FROM_BLOCK,TEE_CODE_HASH,HTTP_TIMEOUT_MS,HTTP_MAX_BYTES"
+
+# Normalize every mtime LAST. npm, tar and the layer digest all record them.
+RUN find /app -exec touch -h -d "@${SOURCE_DATE_EPOCH}" {} +
+
+EXPOSE 7702
+
+# bash, not sh: dash has no `wait -n`, and without it the container survives a dead node.
+CMD ["/bin/bash", "-c", "/app/server & node /app/extension/dist/fcc/main.js & wait -n"]
