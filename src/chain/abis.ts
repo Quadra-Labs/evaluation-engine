@@ -12,7 +12,7 @@
  * must not need gas, a nonce, or a funded wallet to do its job.
  *
  * Two fragments below carry the deltas most likely to be copied wrong from the Flare reference:
- * `competitions` returns THIRTEEN fields with an explicit `exists` flag (the reference decodes
+ * `competitions` returns FIFTEEN fields with an explicit `exists` flag (the reference decodes
  * eight and uses `resolveAt != 0` as an existence sentinel, which reads a nonexistent competition
  * as a free open one), and `deliver`/`submitSealed` are listed as writes we never call purely so
  * `decodeFunctionData` can recover the ciphertext from their calldata.
@@ -40,9 +40,19 @@ export const jobEscrowAbi = parseAbi([
 
 export const sealedCompetitionAbi = parseAbi([
     // --- reads ---
-    // THIRTEEN fields. Existence is `exists`, never `resolveAt != 0`: the contract replaced that
+    // FIFTEEN fields. Existence is `exists`, never `resolveAt != 0`: the contract replaced that
     // sentinel precisely because it let a funded competition read as nonexistent.
-    'function competitions(bytes32) view returns (string evaluatorId, bytes32 category, uint8 kind, uint256 stake, uint256 seedPrize, uint256 stakedTotal, uint256 prizePool, uint64 resolveAt, uint64 threshold, bool exists, bool settled, bool cancelled, address creator)',
+    //
+    // `lifetimeSecs` and `params` are APPENDED, after `creator` and after the omitted `splitPct`,
+    // so every index that already existed still points at the same field. That is deliberate on the
+    // Solidity side and it is why this line could be widened rather than re-ordered — a shifted
+    // index decodes cleanly into the wrong field, which nothing here would catch.
+    //
+    // `params` is the competition's own scope (JSON-in-hex, the same blob a paid job carries) and
+    // `lifetimeSecs` is the window it is scored over. Before they existed the engine substituted
+    // `DEFAULT_FEED` and `DEFAULT_LIFETIME_SECS` from its own config, so an ETH competition was
+    // graded against the BTC feed and nobody could read the window they were judged over.
+    'function competitions(bytes32) view returns (string evaluatorId, bytes32 category, uint8 kind, uint256 stake, uint256 seedPrize, uint256 stakedTotal, uint256 prizePool, uint64 resolveAt, uint64 threshold, bool exists, bool settled, bool cancelled, address creator, uint32 lifetimeSecs, bytes params)',
     'function submissions(bytes32, address) view returns (bytes32)',
     'function joined(bytes32, address) view returns (bool)',
     'function settledReceiptHash(bytes32) view returns (bytes32)',
@@ -51,7 +61,7 @@ export const sealedCompetitionAbi = parseAbi([
     'function submitSealed(bytes32 competitionId, bytes ciphertext)',
 
     // --- events ---
-    'event CompetitionCreated(bytes32 indexed competitionId, string evaluatorId, uint8 kind, uint256 stake, uint256 seedPrize, uint64 resolveAt, uint64 threshold, address indexed creator)',
+    'event CompetitionCreated(bytes32 indexed competitionId, string evaluatorId, uint8 kind, uint256 stake, uint256 seedPrize, uint64 resolveAt, uint64 threshold, address indexed creator, uint32 lifetimeSecs, bytes params)',
     'event Joined(bytes32 indexed competitionId, address indexed agent, uint256 stake)',
     'event Submitted(bytes32 indexed competitionId, address indexed agent, bytes32 ciphertextHash)',
 ]);

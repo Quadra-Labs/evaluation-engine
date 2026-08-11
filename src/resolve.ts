@@ -10,19 +10,25 @@
  * is `lifetimeEnd - paidAt` — two values written when the buyer paid, long before anyone asked for
  * a score.
  *
- * COMPETITIONS know neither. `SealedCompetition.create` records an `evaluatorId` and a `resolveAt`
- * and nothing about an asset, so there is no per-competition asset to read. This is a limit of the
- * deployed contract, not an omission here, and the honest response is to say so loudly rather than
- * silently substitute a default:
+ * COMPETITIONS NOW KNOW BOTH TOO. `SealedCompetition.create` records `params` — the same
+ * JSON-in-hex blob a job carries, so `jobAsset()` reads either — and `lifetimeSecs`, the window the
+ * entries are scored over. Both are written when the competition is opened, so neither the enclave
+ * nor whoever asks for the settlement has any say in them.
  *
- *   - `feedForEvaluator` looks for a known feed asset inside the evaluator id first, so an
- *     evaluator family that names its asset (`price-range-guess-eth`) resolves correctly the day
- *     one is registered.
- *   - Only when the id names nothing does it fall back to `DEFAULT_FEED`, and it WARNS. The
- *     Flare reference hardcoded `feedForEvaluator: () => config.defaultFeed` with no warning and
- *     no id inspection, so every competition scored against BTC/USD whatever it was about — and
- *     `DEFAULT_FEED` is in the image's env-override allow-list, meaning an operator could change
- *     what every competition was measured by without changing the code hash.
+ * That is new. Until plan/09 feature 44 a competition recorded only an `evaluatorId` and a
+ * `resolveAt`, and the two missing values were substituted from the engine's own configuration:
+ * `DEFAULT_FEED` and `DEFAULT_LIFETIME_SECS`. Both are in the image's env-override allow-list, so
+ * an operator could change what every competition was measured by, and over how long, without
+ * changing the code hash — and an ETH competition was graded against the BTC feed. The Flare
+ * reference went further still, hardcoding `feedForEvaluator: () => config.defaultFeed` with no
+ * warning at all.
+ *
+ * The fallback chain remains, because an empty `params` is legal and means "no asset declared":
+ *
+ *   - the competition's own asset wins (`feedFor` in quadra-core);
+ *   - then `feedForEvaluator` looks for a known feed asset inside the evaluator id, so an evaluator
+ *     family that names its asset (`price-range-guess-eth`) resolves correctly;
+ *   - only when neither names anything does it fall back to `DEFAULT_FEED`, and it WARNS.
  */
 
 import { FEED_IDS, isFeedSymbol, jobAsset } from 'quadra-core';
@@ -147,10 +153,12 @@ function makeConfig(policy: ResolvePolicy, warnOnFallback: boolean): ResolveConf
             const named = feedFromEvaluatorId(evaluatorId);
             if (named) return named;
             if (warnOnFallback) {
-                log.warn('no asset in the evaluator id, scoring against DEFAULT_FEED', {
+                log.warn('nothing named an asset, scoring against DEFAULT_FEED', {
                     evaluatorId,
                     defaultFeed: fallbackFeed,
-                    note: 'a competition carries no asset on chain; see resolve.ts',
+                    note:
+                        'the item declared no asset in its params and the evaluator id names ' +
+                        'none either — open competitions with PARAMS_JSON to avoid this',
                 });
             }
             return fallbackFeed as FeedSymbol;
@@ -217,15 +225,29 @@ export async function resolveForJob(
 }
 
 /**
- * A competition's window. There is no per-entrant start, so `DEFAULT_LIFETIME_SECS` sizes the
- * scorer's tolerance for every entrant equally — which is the fair reading of a competition where
- * everyone forecast the same horizon.
+ * A competition's window: `[resolveAt - lifetimeSecs, resolveAt]`, against the asset its `params`
+ * declare.
+ *
+ * There is still no per-entrant start — everyone in a competition is scored over the same window,
+ * which is the fair reading of a market where everyone forecast the same horizon. What changed is
+ * WHOSE window it is. `lifetimeSecs` is the competition's own, fixed when it was created and
+ * readable by every entrant before they staked; it used to be `DEFAULT_LIFETIME_SECS`, an operator
+ * setting nobody outside the enclave could see.
+ *
+ * `windowSecs` is passed through as-is. `create` rejects a zero window, so a zero reaching here
+ * means a competition created against the OLD contract, and `resolveInputs` treats it as absent and
+ * falls back to `defaultLifetimeSecs` — which is precisely what such a competition was scored over
+ * when it was opened.
  */
 export async function resolveForCompetition(
     policy: ResolvePolicy,
     args: {
         readonly evaluatorId: string;
         readonly resolveAtSecs: number;
+        /** From the competition's `params`; undefined when it declared none. */
+        readonly asset?: string | undefined;
+        /** The competition's `lifetimeSecs`. */
+        readonly windowSecs?: number | undefined;
         readonly cache?: PriceCache | undefined;
     },
 ): Promise<ResolvedWindow> {
@@ -234,6 +256,8 @@ export async function resolveForCompetition(
         args.cache,
         args.evaluatorId,
         args.resolveAtSecs,
+        args.asset,
+        args.windowSecs,
     );
 }
 

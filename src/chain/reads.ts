@@ -88,6 +88,14 @@ export interface Competition {
     readonly settled: boolean;
     readonly cancelled: boolean;
     readonly creator: Address;
+    /**
+     * The window the entries are SCORED over, ending at `resolveAt`. Always non-zero: `create`
+     * rejects a zero window rather than letting it mean "use the engine's default", which is the
+     * ambiguity this field exists to remove.
+     */
+    readonly lifetimeSecs: number;
+    /** The competition's own scope, in the same JSON-in-hex blob a paid job carries. */
+    readonly params: Hex;
 }
 
 export interface Submission {
@@ -267,6 +275,8 @@ export function makeChainReader(config: ReaderConfig): ChainReader {
                 boolean,
                 boolean,
                 Address,
+                number,
+                Hex,
             ];
             return {
                 evaluatorId: row[0],
@@ -282,6 +292,9 @@ export function makeChainReader(config: ReaderConfig): ChainReader {
                 settled: row[10],
                 cancelled: row[11],
                 creator: row[12],
+                // Appended on chain, so indices 0-12 above are untouched — see `abis.ts`.
+                lifetimeSecs: row[13],
+                params: row[14],
             };
         },
 

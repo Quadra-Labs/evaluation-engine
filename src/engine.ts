@@ -45,7 +45,7 @@ import {
     scoreMarket,
     type PortfolioSubmission,
 } from './evaluators/index.js';
-import { decodeJobParams } from 'quadra-core';
+import { decodeJobParams, jobAsset } from 'quadra-core';
 import { validateDelivery, type ValidationVerdict } from './validate.js';
 import type { ChainReader } from './chain/reads.js';
 import { payloadFault, type Decryptors } from './decrypt.js';
@@ -239,7 +239,16 @@ export function makeEngine(deps: EngineDeps): Engine {
 
         const submissions = await deps.chain.getSubmissions(competitionId, createdAt);
         if (submissions.length === 0) {
-            throw tooEarly(`competition ${competitionId} has no submissions to settle`);
+            // TERMINAL, not too-early — the same reasoning as the empty-asset-union case below.
+            // `submitSealed` reverts `NotOpen` from `resolveAt` onwards and the clock guard above
+            // has already passed, so the entry set is FINAL: no later attempt will see a submission
+            // that is not here now. A keeper told "too early" retries this forever against a
+            // competition that can never gain an entrant, and the real remedy — `cancel` after
+            // CANCEL_WINDOW, then each agent withdraws its stake — needs a person, not a retry.
+            throw terminal(
+                `competition ${competitionId} has no submissions and submissions closed at ` +
+                    `resolveAt, so it can never gain one — cancel it to release the seed prize`,
+            );
         }
 
         const entries: DecryptedEntry[] = [];
@@ -293,7 +302,15 @@ export function makeEngine(deps: EngineDeps): Engine {
         }
 
         if (entries.length === 0) {
-            throw tooEarly(`competition ${competitionId} has no joined entrants to settle`);
+            // Also terminal. Everything that emptied this list is fixed history: who joined, who
+            // submitted, and which transactions the bytes could be recovered from. Retrying re-runs
+            // the same reads over the same closed set.
+            throw terminal(
+                `competition ${competitionId} has ${submissions.length} submission(s) but no ` +
+                    `settleable entrant: every one either never joined or had bytes that could not ` +
+                    `be recovered. Submissions closed at resolveAt, so this cannot change — cancel ` +
+                    `the competition to release the stakes`,
+            );
         }
 
         assertSettleable(competition.evaluatorId, false);
@@ -353,8 +370,12 @@ export function makeEngine(deps: EngineDeps): Engine {
             }
             const resolved = await resolveForPortfolio(deps.policy, {
                 evaluatorId: competition.evaluatorId,
+                // The ASSETS are each entrant's, from their own sealed portfolio; the WINDOW is the
+                // competition's. A portfolio competition declares no single asset, so `params` is
+                // not consulted here — only `lifetimeSecs` is.
                 assets: [...assets],
                 resolveAtSecs: Number(competition.resolveAt),
+                windowSecs: competition.lifetimeSecs,
                 cache: priceCache,
             });
             return buildPortfolioCompetitionResult({
@@ -370,6 +391,11 @@ export function makeEngine(deps: EngineDeps): Engine {
         const window = await resolveForCompetition(deps.policy, {
             evaluatorId: competition.evaluatorId,
             resolveAtSecs: Number(competition.resolveAt),
+            // The competition's OWN scope and window, not this engine's configuration. Both are
+            // fixed on chain when it is created, so an operator can no longer change what a
+            // competition is measured against — or over how long — without changing the code hash.
+            asset: jobAsset(competition.params),
+            windowSecs: competition.lifetimeSecs,
             cache: priceCache,
         });
 
