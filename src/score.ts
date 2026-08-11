@@ -37,7 +37,8 @@ import { competitionDomain, competitionTypes, jobDomain, jobTypes } from 'quadra
 import { settlementDigest, jobSettlementDigest } from 'quadra-core';
 import { sign } from 'viem/accounts';
 import type { Address, Hex } from 'viem';
-import { MAX_ENTRIES, KIND_SCORING } from './chain/abis.js';
+import { MAX_ENTRIES, MAX_PROOFS, KIND_SCORING } from './chain/abis.js';
+import type { FeedDataWithProof } from 'quadra-core';
 import type { ResolvedPortfolio, ResolvedWindow } from './resolve.js';
 import {
     computeMetric,
@@ -193,12 +194,42 @@ export interface SettlementEntry {
 
 export interface UnsignedCompetitionSettlement {
     readonly competitionId: Hex;
-    readonly groundTruthValue: bigint;
+    /**
+     * The signed ground truth, as PARALLEL ARRAYS index-aligned with `proofs`.
+     *
+     * Length 1 for a single-asset competition; one entry per attested leg for a portfolio. The
+     * feed ids are signed alongside the values so `FtsoLib.checkGroundTruths` can refuse a proof
+     * for an asset this settlement never named.
+     */
+    readonly feedIds: readonly Hex[];
+    readonly groundTruthValues: readonly bigint[];
+    readonly proofs: readonly FeedDataWithProof[];
     readonly entries: readonly SettlementEntry[];
     readonly receipt: Receipt;
     readonly receiptBytes: Hex;
     readonly receiptHash: Hex;
+    /** The window the SCORER used — the primary asset's. See `ResolvedPortfolio.primary`. */
     readonly window: ResolvedWindow;
+}
+
+/**
+ * The signed ground truth for a settlement measured against exactly one feed.
+ *
+ * Every non-portfolio settlement goes through here rather than building the three arrays inline,
+ * so "one asset" is expressed once. The arrays must stay index-aligned and non-empty —
+ * `FtsoLib.checkGroundTruths` reverts `NoGroundTruth` on an empty set rather than treating it as
+ * nothing to check.
+ */
+function singleGroundTruth(window: ResolvedWindow): {
+    feedIds: readonly Hex[];
+    groundTruthValues: readonly bigint[];
+    proofs: readonly FeedDataWithProof[];
+} {
+    return {
+        feedIds: [window.end.feed.body.id],
+        groundTruthValues: [window.end.value],
+        proofs: [window.end.feed],
+    };
 }
 
 export function buildCompetitionResult(
@@ -263,7 +294,7 @@ export function buildCompetitionResult(
 
     return {
         competitionId: input.competitionId,
-        groundTruthValue: input.window.end.value,
+        ...singleGroundTruth(input.window),
         entries: settlementEntries,
         receipt,
         receiptBytes: receiptBytes(receipt),
@@ -352,12 +383,48 @@ export function buildPortfolioCompetitionResult(
         );
     }
 
+    // Every leg gets an on-chain proof, up to the contract's cap.
+    //
+    // OVER THE CAP THE TAIL IS DROPPED FROM THE PROOFS, NOT FROM THE SCORING. The prices are still
+    // used to value the portfolio — refusing to settle would let one entrant naming a hundred
+    // assets hold everyone else's payout hostage — so what degrades past MAX_PROOFS is how much of
+    // the ground truth the CHAIN re-verifies, not whether the competition resolves. Sorted order
+    // makes which assets those are deterministic and replayable rather than arrival-dependent.
+    const covered = input.resolved.windows.slice(0, MAX_PROOFS);
+    if (input.resolved.windows.length > MAX_PROOFS) {
+        log.warn('more assets than the settlement can pin on chain; the tail is TEE-attested only', {
+            competitionId: input.competitionId,
+            assets: input.resolved.windows.length,
+            maxProofs: MAX_PROOFS,
+            // Joined rather than passed as an array: the log context is a flat scalar map, and
+            // naming the assets is the whole value of the line.
+            uncovered: input.resolved.windows
+                .slice(MAX_PROOFS)
+                .map((w) => w.asset)
+                .join(','),
+        });
+    }
+
     const receipt: Receipt = {
         competitionId: input.competitionId,
-        // Recorded so a reader knows WHICH of the portfolio's feeds the on-chain proof covers.
-        evaluatorId: `${input.evaluatorId}@${input.resolved.primaryAsset}`,
+        // The BARE evaluator id. This used to be `${id}@${primaryAsset}` so a reader could tell
+        // which leg the single on-chain proof covered — but the verifier looks the evaluator up by
+        // this exact string (`replayability(receipt.evaluatorId)`), and no scorer is registered
+        // under "portfolio-roi@BTC". Every honest portfolio settlement therefore verified as
+        // FAILED with "this build has no scorer ... or the settlement may not be genuine", which
+        // is BUGS.md 4's failure mode arriving by a different route.
+        //
+        // The suffix is also now redundant: `groundTruths` below records every attested asset, and
+        // `groundTruths[0]` IS the primary — the same leg `startValue` and `lifetimeSecs` describe.
+        // A structured field a verifier can read beats an asset name encoded into a lookup key.
+        evaluatorId: input.evaluatorId,
         teeImageDigest: input.teeImageDigest,
         groundTruth: window.end.groundTruth,
+        groundTruths: covered.map((w) => ({
+            asset: w.asset,
+            groundTruth: w.window.end.groundTruth,
+            startValue: w.window.startValue.toString(),
+        })),
         startValue: window.startValue.toString(),
         lifetimeSecs: window.lifetimeSecs,
         entries: receiptEntries,
@@ -366,7 +433,9 @@ export function buildPortfolioCompetitionResult(
 
     return {
         competitionId: input.competitionId,
-        groundTruthValue: window.end.value,
+        feedIds: covered.map((w) => w.window.end.feed.body.id),
+        groundTruthValues: covered.map((w) => w.window.end.value),
+        proofs: covered.map((w) => w.window.end.feed),
         entries: settlementEntries,
         receipt,
         receiptBytes: receiptBytes(receipt),
@@ -414,7 +483,8 @@ export async function signCompetitionSettlement(
     const digest = settlementDigest(ctx.chainId, ctx.sealedCompetition, {
         competitionId: settlement.competitionId,
         receiptHash: settlement.receiptHash,
-        groundTruthValue: settlement.groundTruthValue,
+        feedIds: settlement.feedIds,
+        groundTruthValues: settlement.groundTruthValues,
         entries: settlement.entries,
     });
     return sign({ hash: digest, privateKey: ctx.privateKey, to: 'hex' });

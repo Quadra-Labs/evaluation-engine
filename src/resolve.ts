@@ -149,12 +149,21 @@ export interface ResolvedPortfolio {
     readonly startPrices: ReadonlyMap<string, bigint>;
     readonly endPrices: ReadonlyMap<string, bigint>;
     /**
-     * The ONE asset whose feed proof rides in the settlement.
+     * Every asset's resolved window, in the same sorted order as `startPrices`/`endPrices`.
      *
-     * A settlement carries a single `groundTruthValue` and a single `FeedDataWithProof`, so only
-     * one of a portfolio's assets can be cross-checked on chain by `FtsoLib.checkGroundTruth`. The
-     * rest are attested by the TEE signature alone. The first asset in sorted order is chosen so
-     * the pick is deterministic and replayable rather than "whichever resolved first".
+     * These become the settlement's parallel `feedIds` / `groundTruthValues` / `proofs` arrays, so
+     * `FtsoLib.checkGroundTruths` cross-checks EVERY leg on chain rather than one.
+     *
+     * Before BUGS.md 27 this struct kept only `primary` and threw the rest away — the DA layer had
+     * already been paid for them, and a settlement carried a single value and a single proof, so a
+     * portfolio naming BTC, ETH and SOL had two thirds of its ground truth attested by the TEE
+     * signature alone.
+     */
+    readonly windows: readonly { readonly asset: string; readonly window: ResolvedWindow }[];
+    /**
+     * The asset the SCORER measured against, and whose `startValue`/`lifetimeSecs` the receipt
+     * records as primary. Still the first in sorted order, so the pick stays deterministic and
+     * replayable rather than "whichever resolved first". It is no longer the only attested one.
      */
     readonly primary: ResolvedWindow;
     readonly primaryAsset: string;
@@ -196,7 +205,7 @@ export async function resolveForPortfolio(
     const config = makeConfig(policy, false);
     const startPrices = new Map<string, bigint>();
     const endPrices = new Map<string, bigint>();
-    let primary: ResolvedWindow | undefined;
+    const windows: { asset: string; window: ResolvedWindow }[] = [];
 
     for (const asset of sorted) {
         const resolved = await resolveInputs(
@@ -208,9 +217,16 @@ export async function resolveForPortfolio(
         );
         startPrices.set(asset, resolved.startValue);
         endPrices.set(asset, resolved.end.value);
-        primary ??= resolved;
+        // Kept, not discarded: each carries the feed proof that pins its leg on chain.
+        windows.push({ asset, window: resolved });
     }
 
     const primaryAsset = sorted[0] as string;
-    return { startPrices, endPrices, primary: primary as ResolvedWindow, primaryAsset };
+    return {
+        startPrices,
+        endPrices,
+        windows,
+        primary: (windows[0] as { window: ResolvedWindow }).window,
+        primaryAsset,
+    };
 }

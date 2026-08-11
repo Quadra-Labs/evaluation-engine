@@ -164,10 +164,15 @@ export function makeSettleCompetitionHandler(deps: HandlerDeps): HandlerFunc {
                 encodeTeeCompetitionSettlement({
                     competitionId: settlement.competitionId,
                     receiptHash: settlement.receiptHash,
-                    groundTruthValue: settlement.groundTruthValue,
+                    // The parallel arrays come off the settlement as a set. Rebuilding any of them
+                    // here from `window.end.feed` — which the single-proof version did — would
+                    // silently drop every asset but the primary on the FCC path only, so the two
+                    // settlement routes would attest to different things.
+                    feedIds: settlement.feedIds,
+                    groundTruthValues: settlement.groundTruthValues,
                     entries: settlement.entries,
                     receipt: settlement.receiptBytes,
-                    proof: settlement.window.end.feed,
+                    proofs: settlement.proofs,
                 }),
                 STATUS_SUCCESS,
                 null,

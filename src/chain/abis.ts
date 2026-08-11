@@ -89,6 +89,25 @@ export const vtpmVerifierAbi = parseAbi([
     'function owner() view returns (address)',
 ]);
 
+/**
+ * `SealedCompetition.settle` — declared but NEVER CALLED. The engine holds no wallet.
+ *
+ * It is here so `settle`'s positional layout is covered by `test/abis.mjs` like everything else.
+ * `settlement.ts::CompetitionSettleArgs` builds this tuple by hand, and it was the one positional
+ * layout in the four repos held correct by reading alone: a future reordering of the Solidity
+ * parameters would regenerate `contracts/abi/`, pass `abi.sh --check`, pass both ABI checkers, and
+ * still silently break the tuple — surfacing as a reasonless revert in whatever finally submits it.
+ *
+ * Note `proofs` is NOT adjacent to `groundTruthValues`: `entries` and `signature` sit between them.
+ * That is the detail a hand-built tuple gets wrong.
+ */
+export const sealedCompetitionSettleAbi = parseAbi([
+    'struct FeedData { uint32 votingRoundId; bytes21 id; int32 value; uint16 turnoutBPS; int8 decimals; }',
+    'struct FeedDataWithProof { bytes32[] proof; FeedData body; }',
+    'struct EntryInput { address agent; uint64 score; }',
+    'function settle(bytes32 competitionId, bytes32 receiptHash, bytes21[] feedIds, uint256[] groundTruthValues, EntryInput[] entries, bytes signature, FeedDataWithProof[] proofs, bytes receipt)',
+]);
+
 /** `SealedCompetition.KIND_SCORING` — ranked on a [0,100] score, and the only kind Passport records. */
 export const KIND_SCORING = 0;
 /** `SealedCompetition.KIND_PERFORMANCE` — ranked on `PERF_BASE + roi_bps`, a uint64 around 1e6. */
@@ -97,3 +116,12 @@ export const KIND_PERFORMANCE = 1;
 export const PERF_BASE = 1_000_000n;
 /** `SealedCompetition.MAX_ENTRIES`. A settlement naming more than this reverts. */
 export const MAX_ENTRIES = 512;
+/**
+ * `SealedCompetition.MAX_PROOFS`. The most (feedId, value, proof) triples one settlement may carry.
+ *
+ * A portfolio whose entrants collectively name more assets than this still SETTLES: the first
+ * MAX_PROOFS assets in sorted order carry on-chain proofs and the tail is attested by the TEE
+ * signature alone. Truncating rather than refusing is deliberate — refusing would let one entrant
+ * naming a hundred assets block everyone else's payout.
+ */
+export const MAX_PROOFS = 10;

@@ -39,18 +39,25 @@ export type JobSettleArgs = readonly [
 ];
 
 /**
- * `SealedCompetition.settle(bytes32,bytes32,uint256,EntryInput[],bytes,FeedDataWithProof,bytes)`.
+ * `SealedCompetition.settle(bytes32,bytes32,bytes21[],uint256[],EntryInput[],bytes,
+ * FeedDataWithProof[],bytes)`.
  *
  * `EntryInput.score` is uint64, so it crosses as a bigint. The Flare reference declares it uint8;
  * copying that misaligns every field after it while still "encoding successfully".
+ *
+ * `feedIds`, `groundTruthValues` and `proofs` are three separate positional arguments that must
+ * stay index-aligned. They are NOT adjacent in the tuple — `entries` and `signature` sit between
+ * the values and the proofs, matching the Solidity — which is exactly the kind of ordering this
+ * file's header warns is easy to get wrong from memory.
  */
 export type CompetitionSettleArgs = readonly [
     competitionId: Hex,
     receiptHash: Hex,
-    groundTruthValue: bigint,
+    feedIds: readonly Hex[],
+    groundTruthValues: readonly bigint[],
     entries: readonly SettlementEntry[],
     signature: Hex,
-    proof: FeedDataWithProof,
+    proofs: readonly FeedDataWithProof[],
     receipt: Hex,
 ];
 
@@ -73,10 +80,11 @@ export function competitionSettleArgs(
     return [
         settlement.competitionId,
         settlement.receiptHash,
-        settlement.groundTruthValue,
+        settlement.feedIds,
+        settlement.groundTruthValues,
         settlement.entries,
         signature,
-        settlement.window.end.feed,
+        settlement.proofs,
         settlement.receiptBytes,
     ];
 }
@@ -112,11 +120,13 @@ export interface WireJobSettlement {
 
 export interface WireCompetitionSettlement {
     readonly competitionId: Hex;
-    readonly groundTruthValue: string;
+    /** Index-aligned with `groundTruthValues` and `proofs`. Length 1 unless it is a portfolio. */
+    readonly feedIds: readonly Hex[];
+    readonly groundTruthValues: readonly string[];
     readonly entries: readonly { readonly agent: Address; readonly score: string }[];
     readonly receiptHash: Hex;
     readonly receipt: Hex;
-    readonly proof: WireFeedProof;
+    readonly proofs: readonly WireFeedProof[];
     readonly signature: Hex;
 }
 
@@ -155,11 +165,12 @@ export function wireCompetitionSettlement(
 ): WireCompetitionSettlement {
     return {
         competitionId: settlement.competitionId,
-        groundTruthValue: settlement.groundTruthValue.toString(),
+        feedIds: settlement.feedIds,
+        groundTruthValues: settlement.groundTruthValues.map((v) => v.toString()),
         entries: settlement.entries.map((e) => ({ agent: e.agent, score: e.score.toString() })),
         receiptHash: settlement.receiptHash,
         receipt: settlement.receiptBytes,
-        proof: wireProof(settlement.window.end.feed),
+        proofs: settlement.proofs.map(wireProof),
         signature,
     };
 }
