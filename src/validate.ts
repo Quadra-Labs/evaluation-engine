@@ -90,7 +90,9 @@ export async function validateDelivery(deps: ValidateDeps, jobId: Hex): Promise<
             intake.evaluatorId,
             true,
             false,
-            'the delivered ciphertext could not be recovered from its transaction',
+            'the delivered ciphertext could not be recovered from its transaction ' +
+                '(unrecoverable-tx): deliver() must be a direct call, not a multicall or an ' +
+                'account-abstraction bundle',
             onChainHash,
         );
     }
@@ -122,13 +124,28 @@ export async function validateDelivery(deps: ValidateDeps, jobId: Hex): Promise<
     }
 
     const revealed = await deps.decryptDelivery(ciphertext);
+    // Two verdicts, not one. "Would not open" points an operator at the enclave key (BUGS.md 36's
+    // stale-key case, which fails for EVERY agent at once); "opened and was empty" points at the
+    // agent. Answering both with "could not be decrypted" is how a key rotation gets triaged as a
+    // wave of bad deliveries.
+    if (revealed === undefined) {
+        return verdict(
+            jobId,
+            intake.evaluatorId,
+            true,
+            false,
+            'the delivery could not be decrypted (undecryptable-payload): it may have been sealed ' +
+                'to a previous enclave key',
+            deliveryHash,
+        );
+    }
     if (Object.keys(revealed).length === 0) {
         return verdict(
             jobId,
             intake.evaluatorId,
             true,
             false,
-            'the delivery could not be decrypted',
+            'the delivery decrypted to no fields (empty-delivery)',
             deliveryHash,
         );
     }

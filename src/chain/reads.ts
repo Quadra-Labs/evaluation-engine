@@ -92,8 +92,19 @@ export interface Competition {
 
 export interface Submission {
     readonly agent: Address;
-    readonly ciphertext: Hex;
+    /**
+     * The sealed bytes, or `undefined` when they could not be recovered from the transaction.
+     *
+     * Absent is NOT the same as absent from the competition. `Submitted(competitionId, agent, hash)`
+     * is on chain either way, so an entrant whose bytes we cannot read demonstrably did submit —
+     * dropping them here without a word (which is what this did before BUGS.md 29) leaves an
+     * auditor holding an on-chain event with no matching entry and no explanation. What to do about
+     * it is the ENGINE's decision, so this reports and does not decide.
+     */
+    readonly ciphertext: Hex | undefined;
     readonly ciphertextHash: Hex;
+    /** The transaction the bytes were meant to come from, so a warning can name it. */
+    readonly txHash: Hex;
 }
 
 export interface ChainReader {
@@ -331,8 +342,7 @@ export function makeChainReader(config: ReaderConfig): ChainReader {
             const out: Submission[] = [];
             for (const [agent, { hash, txHash }] of latest) {
                 const ciphertext = await ciphertextFromTx(txHash, sealedCompetitionAbi as Abi);
-                if (!ciphertext) continue;
-                out.push({ agent, ciphertext, ciphertextHash: hash });
+                out.push({ agent, ciphertext, ciphertextHash: hash, txHash });
             }
             return out;
         },

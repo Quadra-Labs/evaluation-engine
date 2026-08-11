@@ -51,8 +51,10 @@ export {
     localDecryptors,
     nodeDecryptors,
     nodeUnwrap,
+    payloadFault,
     type Decryptor,
     type Decryptors,
+    type PayloadFault,
 } from './decrypt.js';
 
 export { validateDelivery, type ValidationVerdict } from './validate.js';

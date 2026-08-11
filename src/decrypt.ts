@@ -32,8 +32,50 @@ import type { Hex } from 'viem';
 import type { NodeClient } from './fcc/base/node.js';
 import { log, errorMessage } from './log.js';
 
-/** Ciphertext in, the agent's submitted fields out. Always async: FCC's unwrap is a round trip. */
-export type Decryptor = (ciphertext: Hex) => Promise<Record<string, string>>;
+/**
+ * Ciphertext in, the agent's submitted fields out. Always async: FCC's unwrap is a round trip.
+ *
+ * `undefined` means COULD NOT OPEN; `{}` means opened and there was nothing inside. Collapsing both
+ * to `{}` is what BUGS.md 29 is about — from the outside they score identically, and from an
+ * operator's chair they could not be more different. An unopenable payload is very often OUR fault
+ * (the enclave restarted and the on-chain public key is stale, BUGS.md 36), and it arrives as a
+ * flood affecting every agent at once; an empty one is a single agent sending junk. A monitor that
+ * cannot separate them cannot see the outage.
+ */
+export type Decryptor = (ciphertext: Hex) => Promise<Record<string, string> | undefined>;
+
+/**
+ * Why a payload could not be scored, as a stable string rather than prose.
+ *
+ * These are LOG FIELDS and a relayer's classification input, so they are values a machine can group
+ * by. Each has a different owner:
+ *
+ *   `unrecoverable-tx`       the bytes never came back from the transaction. The delivery reached
+ *                            the contract through something other than a direct call — a multicall,
+ *                            a relayer contract, an account-abstraction bundle — and only
+ *                            `keccak256(ciphertext)` is on chain. THE AGENT'S WALLET CHOICE.
+ *   `undecryptable-payload`  the bytes came back and would not open. Either a hostile blob, or the
+ *                            enclave's key rotated after the agent sealed to it. OURS, usually.
+ *   `empty-delivery`         it opened, and the agent had put nothing in it. THE AGENT'S.
+ */
+export type PayloadFault = 'unrecoverable-tx' | 'undecryptable-payload' | 'empty-delivery';
+
+/**
+ * Classify a recovery attempt, from the two signals every call site already holds.
+ *
+ * One implementation so the job path, the competition path and `/validate` cannot drift into
+ * describing the same failure three different ways — which is the state BUGS.md 29 found them in.
+ * Returns `undefined` when there is nothing wrong.
+ */
+export function payloadFault(
+    ciphertext: Hex | undefined,
+    revealed: Record<string, string> | undefined,
+): PayloadFault | undefined {
+    if (ciphertext === undefined) return 'unrecoverable-tx';
+    if (revealed === undefined) return 'undecryptable-payload';
+    if (Object.keys(revealed).length === 0) return 'empty-delivery';
+    return undefined;
+}
 
 function toBytes(ciphertext: Hex): Uint8Array {
     const hex = ciphertext.startsWith('0x') ? ciphertext.slice(2) : ciphertext;
@@ -61,7 +103,7 @@ export function makeDecryptor(privateKey: Hex): Decryptor {
             return asFields(await openTeeKey(privateKey, ciphertext));
         } catch (err) {
             log.debug('could not open a sealed submission', { reason: errorMessage(err) });
-            return {};
+            return undefined;
         }
     };
 }
@@ -73,7 +115,7 @@ export function makeEnvelopeDecryptor(privateKey: Hex): Decryptor {
             return await openEnvelopeWithTeeKey(privateKey, ciphertext);
         } catch (err) {
             log.debug('could not open a delivered envelope', { reason: errorMessage(err) });
-            return {};
+            return undefined;
         }
     };
 }
@@ -102,11 +144,13 @@ export function makeNodeDecryptor(node: NodeClient): Decryptor {
     const unwrap = nodeUnwrap(node);
     return async (ciphertext) => {
         const plaintext = await unwrap(ciphertext);
-        if (!plaintext) return {};
+        if (!plaintext) return undefined;
         try {
             return asFields(plaintext);
         } catch {
-            return {};
+            // Opened, but the plaintext was not JSON. Still `undefined`: the bytes we hold are not
+            // a submission, which is a different statement from "the agent submitted nothing".
+            return undefined;
         }
     };
 }
@@ -121,7 +165,7 @@ export function makeNodeEnvelopeDecryptor(node: NodeClient): Decryptor {
             log.debug('could not open a delivered envelope through the node', {
                 reason: errorMessage(err),
             });
-            return {};
+            return undefined;
         }
     };
 }

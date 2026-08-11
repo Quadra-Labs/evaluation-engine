@@ -48,7 +48,7 @@ import {
 import { decodeJobParams } from 'quadra-core';
 import { validateDelivery, type ValidationVerdict } from './validate.js';
 import type { ChainReader } from './chain/reads.js';
-import type { Decryptors } from './decrypt.js';
+import { payloadFault, type Decryptors } from './decrypt.js';
 import { log } from './log.js';
 
 const ZERO_ADDRESS = '0x0000000000000000000000000000000000000000';
@@ -154,14 +154,34 @@ export function makeEngine(deps: EngineDeps): Engine {
         }
 
         const ciphertext = await deps.chain.getDeliveredCiphertext(jobId);
-        // A delivery whose bytes cannot be recovered still settles, at zero. Refusing would strand
-        // the agent's reputation on an unresolvable job forever, and the zero is honest: nothing
-        // readable was delivered.
-        const revealed = ciphertext ? await deps.decryptors.delivery(ciphertext) : {};
+        const revealed = ciphertext ? await deps.decryptors.delivery(ciphertext) : undefined;
         const ciphertextHash = await deps.chain.deliveredHashOf(jobId);
 
-        if (Object.keys(revealed).length === 0) {
-            log.warn('scoring a job whose delivery could not be read', { jobId });
+        // A JOB WITH AN UNREADABLE DELIVERY SETTLES AT ZERO. A COMPETITION ENTRY IS DROPPED. The
+        // asymmetry is deliberate and it is not about how bad the failure is — it is about what
+        // each market owes the agent at the end.
+        //
+        // A paid job must reach a terminal state with a Passport word written, because that is what
+        // the escrow's other exit does: `refundNotDelivered` records a mandatory zero. Leaving the
+        // job unscored would strand the agent's reputation on it forever and hold the buyer's
+        // escrow with it, so refusing is not the kinder option — it is the one with no ending. The
+        // zero is honest: nothing readable was delivered.
+        //
+        // A competition entry has no such debt. `SealedCompetition` writes the Passport only for
+        // KIND_SCORING and only for entries the settlement names, so an omitted entrant carries no
+        // record at all — which is the right outcome for a submission nobody can read, and strictly
+        // better than a permanent zero for an agent whose only mistake may have been their wallet.
+        // What they do lose is the stake, which is why the drop is now LOUD (see below).
+        const fault = payloadFault(ciphertext, revealed);
+        if (fault) {
+            log.warn('scoring a job whose delivery could not be read', {
+                jobId,
+                // A stable field, not prose: `unrecoverable-tx` is the agent's wallet, and
+                // `undecryptable-payload` arriving for every job at once is an operator's
+                // emergency (a restarted enclave, BUGS.md 36) rather than an agent problem.
+                fault,
+                score: 0,
+            });
         }
 
         // Refuse BEFORE the DA-layer calls. An evaluator that cannot settle should not cost two
@@ -181,7 +201,7 @@ export function makeEngine(deps: EngineDeps): Engine {
             agent: job.agent,
             evaluatorId: intake.evaluatorId,
             ciphertextHash,
-            revealed,
+            revealed: revealed ?? {},
             window,
             teeImageDigest: deps.teeImageDigest,
             resolvedAtSecs: now,
@@ -235,10 +255,40 @@ export function makeEngine(deps: EngineDeps): Engine {
                 });
                 continue;
             }
+
+            // Bytes we could not recover are dropped rather than scored — see the asymmetry note in
+            // `buildJob` — but never silently. `Submitted` is on chain, so this entrant provably
+            // took part and provably paid a stake; an auditor comparing the log to the settlement
+            // is owed a reason, and `unrecoverable-tx` names the cause precisely enough to answer
+            // the agent who asks why they were not ranked.
+            const revealed = submission.ciphertext
+                ? await deps.decryptors.submission(submission.ciphertext)
+                : undefined;
+            if (submission.ciphertext === undefined) {
+                log.warn('dropping a submission whose bytes could not be recovered', {
+                    competitionId,
+                    agent: submission.agent,
+                    txHash: submission.txHash,
+                    fault: 'unrecoverable-tx',
+                    note: 'submitSealed must be a DIRECT call: only its hash is stored on chain',
+                });
+                continue;
+            }
+            // An UNOPENABLE entry is a different case and is kept: it is scored, at zero or at the
+            // portfolio baseline, exactly as any other unusable submission. Dropping it would let a
+            // stale enclave key quietly empty a competition instead of settling one everybody lost.
+            const fault = payloadFault(submission.ciphertext, revealed);
+            if (fault) {
+                log.warn('an entry could not be read; it is scored, not dropped', {
+                    competitionId,
+                    agent: submission.agent,
+                    fault,
+                });
+            }
             entries.push({
                 agent: submission.agent,
                 ciphertextHash: submission.ciphertextHash,
-                revealed: await deps.decryptors.submission(submission.ciphertext),
+                revealed: revealed ?? {},
             });
         }
 
@@ -367,8 +417,19 @@ export function makeEngine(deps: EngineDeps): Engine {
                 }
 
                 const ciphertext = await deps.chain.getDeliveredCiphertext(jobId);
-                if (!ciphertext) throw terminal(`job ${jobId} has no recoverable delivery`);
+                if (!ciphertext) {
+                    throw terminal(
+                        `job ${jobId} has no recoverable delivery (unrecoverable-tx): only its ` +
+                            `hash is on chain and deliver() was not called directly`,
+                    );
+                }
                 const revealed = await deps.decryptors.delivery(ciphertext);
+                // This endpoint SCORES and never settles, so it may refuse rather than zero — a
+                // caller asking for a market score gets an answer or an error, not a silent 0 it
+                // cannot tell apart from a genuinely wrong forecast.
+                if (revealed === undefined) {
+                    throw terminal(`job ${jobId} has a delivery that will not open`);
+                }
 
                 const score = await scoreMarket({
                     evaluatorId: intake.evaluatorId,
