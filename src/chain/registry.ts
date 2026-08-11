@@ -62,6 +62,47 @@ export async function readRegisteredTee(
     return { wallet, publicKey, imageDigest };
 }
 
+/**
+ * How this instance stands against what the chain publishes. BUGS.md 36.
+ *
+ * The enclave mints a FRESH key at every boot — correct for a TEE, since a persisted key is a key
+ * that outlived the attestation that vouched for it. The cost is that after any restart the
+ * published key is stale, and **every delivery an agent seals in the meantime is permanently
+ * unopenable**: the job then scores zero on an empty submission (BUGS.md 29's
+ * `undecryptable-payload`) and the agent's Passport carries it. Nothing automates the
+ * re-registration, so the state this function names is the difference between noticing in a minute
+ * and noticing after a night of zeroes.
+ *
+ *   `bound`           the chain names this instance's wallet AND its public key. Normal.
+ *   `stale-key`       the wallet matches and the PUBLIC KEY does not. The dangerous one — see below.
+ *   `other-instance`  the chain names a different enclave. Ours must not be sealed to.
+ *   `unregistered`    nothing is bound, or the registry was revoked (`revokeTee`, BUGS.md 35).
+ *
+ * `stale-key` deserves its own state rather than folding into "registered". Comparing the WALLET
+ * alone reads as healthy in two situations where agents cannot reach us: a restart that re-bound
+ * the wallet but not the key, and a `setActiveTee` called with a placeholder public key — which is
+ * not hypothetical, because `Deploy.s.sol` defaults it to a one-byte `hex"04"` (BUGS.md 15). In
+ * both, `activeTeeWallet` is right, settlements verify, and every sealed payload is addressed to
+ * something nobody can open.
+ */
+export type TeeBinding = 'bound' | 'stale-key' | 'other-instance' | 'unregistered';
+
+export function bindingOf(
+    registered: RegisteredTee,
+    self: {
+        readonly address: Address;
+        readonly publicKey: Hex;
+    },
+): TeeBinding {
+    if (registered.wallet === NO_TEE) return 'unregistered';
+    if (registered.wallet.toLowerCase() !== self.address.toLowerCase()) return 'other-instance';
+    // Case-insensitive on purpose: viem returns lower-case hex and a hand-written `setActiveTee`
+    // may not, and a case difference is not a different key.
+    return registered.publicKey.toLowerCase() === self.publicKey.toLowerCase()
+        ? 'bound'
+        : 'stale-key';
+}
+
 /** The attestation verifier the registry is pinned to, or the zero address on a dev deployment. */
 export async function readVtpmVerifier(
     client: PublicClient,

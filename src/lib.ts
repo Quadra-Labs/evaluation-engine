@@ -36,9 +36,11 @@ export {
     readVtpmVerifier,
     bindTee,
     registerAttested,
+    bindingOf,
     NO_TEE,
     type AttestArgs,
     type RegisteredTee,
+    type TeeBinding,
 } from './chain/registry.js';
 export {
     jobEscrowAbi,

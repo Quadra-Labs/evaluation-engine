@@ -16,7 +16,7 @@
 import { loadConfig } from './config.js';
 import { bootTeeIdentity } from './keys.js';
 import { makeChainReader } from './chain/reads.js';
-import { readRegisteredTee, NO_TEE } from './chain/registry.js';
+import { bindingOf, readRegisteredTee, NO_TEE } from './chain/registry.js';
 import { localDecryptors } from './decrypt.js';
 import { makeEngine } from './engine.js';
 import { makeService } from './server.js';
@@ -63,6 +63,18 @@ async function boot(): Promise<void> {
                 bound: registered.wallet,
                 thisInstance: identity.address,
                 note: 'agents are sealing to the bound key, which this instance cannot open',
+            });
+        } else if (bindingOf(registered, identity) === 'stale-key') {
+            // THE RESTART CASE, and the reason it needs its own branch: the wallet matches, so
+            // every check that looks at `activeTeeWallet` reads as healthy, while the PUBLIC KEY
+            // agents seal to is one this process cannot open. The enclave mints a fresh key at
+            // every boot, so a VM that rebooted overnight sits here looking correct and silently
+            // turning every delivery into a permanent zero (BUGS.md 36, then 29).
+            log.warn('the PUBLIC KEY on chain is not the one this instance holds', {
+                onChain: registered.publicKey,
+                thisInstance: identity.publicKey,
+                remedy: 'run pnpm self-register (or register-tee on the dev path) NOW',
+                note: 'anything sealed to the published key in the meantime is unopenable forever',
             });
         } else {
             log.info('this instance is the bound TEE', { address: identity.address });

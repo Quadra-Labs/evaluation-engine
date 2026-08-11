@@ -24,7 +24,7 @@ import { EngineError, statusFor } from './errors.js';
 import { errorMessage, log } from './log.js';
 import { fetchAttestationToken, nonceFor } from './attestation.js';
 import { wireCompetitionSettlement, wireJobSettlement } from './settlement.js';
-import { readRegisteredTee } from './chain/registry.js';
+import { bindingOf, readRegisteredTee } from './chain/registry.js';
 import type { Engine } from './engine.js';
 import type { EngineConfig } from './config.js';
 import type { TeeIdentity } from './keys.js';
@@ -94,6 +94,12 @@ export function makeService(deps: ServiceDeps): Server {
                 wallet: tee.wallet,
                 imageDigest: tee.imageDigest,
                 isThisInstance: tee.wallet.toLowerCase() === deps.identity.address.toLowerCase(),
+                // The state a supervisor polls. `isThisInstance` compares the WALLET and is kept
+                // for compatibility, but it reads as healthy while the published PUBLIC KEY is
+                // stale — and the public key is what every agent seals to. See `bindingOf`.
+                binding: bindingOf(tee, deps.identity),
+                publicKeyMatches:
+                    tee.publicKey.toLowerCase() === deps.identity.publicKey.toLowerCase(),
             }))
             .catch((err) => ({ error: errorMessage(err) }));
 
