@@ -15,7 +15,7 @@
  * complaint a caller sees.
  */
 
-import type { Hex } from 'viem';
+import { keccak256, toHex, type Hex } from 'viem';
 import { notFound, terminal, tooEarly, upstream, EngineError } from './errors.js';
 import { UnknownEvaluatorError, OracleFaultError } from './score.js';
 import {
@@ -52,6 +52,16 @@ import { payloadFault, type Decryptors } from './decrypt.js';
 import { log } from './log.js';
 
 const ZERO_ADDRESS = '0x0000000000000000000000000000000000000000';
+
+/**
+ * `keccak256("scoreless")` — the reserved category for work that is paid on delivery.
+ *
+ * `JobEscrow` stores `category = keccak256(bytes(evaluatorId))` and has no scoreless flag, so the
+ * intake engine and this service agree on the evaluator id itself. Intake releases such a job
+ * without asking for a verdict; this service refuses to score it. The two halves must stay in step:
+ * see `SCORELESS_EVALUATOR_ID` in `intake-engine/src/engine.ts`.
+ */
+const SCORELESS_CATEGORY: Hex = keccak256(toHex('scoreless'));
 
 export interface EngineDeps {
     readonly chain: ChainReader;
@@ -132,6 +142,14 @@ export function makeEngine(deps: EngineDeps): Engine {
         const job = await deps.chain.getJob(jobId);
 
         if (job.user === ZERO_ADDRESS) throw notFound(`no such job ${jobId}`);
+        // A scoreless job is paid on delivery and has no accuracy to grade. Refusing here — for
+        // both the EIP-712 and the FCC path, which share this builder — is what keeps the
+        // convention safe: without it the job has no template, `payloadFault` would find nothing
+        // readable to score, and the mandatory-zero rule below would write a permanent 0 to the
+        // agent's Passport for work the buyer already accepted and paid for.
+        if (job.category === SCORELESS_CATEGORY) {
+            throw terminal(`job ${jobId} is scoreless: paid on delivery, never scored`);
+        }
         if (job.scored) throw terminal(`job ${jobId} is already scored`);
         if (!job.delivered) throw terminal(`job ${jobId} had nothing delivered`);
         // `scoreJobFromTee` requires the escrow to be released first: a job the buyer was refunded
