@@ -12,7 +12,15 @@
 export { loadConfig, deployerKey, ConfigError, type EngineConfig } from './config.js';
 export { bootTeeIdentity, assertUncompressed, type TeeIdentity } from './keys.js';
 export { log, errorMessage, type LogLevel } from './log.js';
-export { EngineError, statusFor, type EngineErrorKind } from './errors.js';
+export {
+    EngineError,
+    statusFor,
+    encodeFailure,
+    decodeFailureKind,
+    KINDS,
+    KIND_SEPARATOR,
+    type EngineErrorKind,
+} from './errors.js';
 
 export {
     makeChainReader,

@@ -42,7 +42,7 @@ import {
     type HandlerResult,
     type RegisterFunc,
 } from '../base/types.js';
-import { EngineError } from '../../errors.js';
+import { encodeFailure, EngineError } from '../../errors.js';
 import { errorMessage, log } from '../../log.js';
 import type { Engine } from '../../engine.js';
 
@@ -99,7 +99,9 @@ function failure(verb: string, err: unknown): HandlerResult {
     if (err instanceof EngineError) {
         const level = err.kind === 'too-early' ? 'debug' : 'warn';
         log[level](`${verb} refused`, { kind: err.kind });
-        return [null, STATUS_ERROR, `${err.kind}: ${err.message}`];
+        // `kind: message`, and the prefix is a contract — see `encodeFailure`. A relayer reads
+        // the kind from the head of this string; it must never match on the prose after it.
+        return [null, STATUS_ERROR, encodeFailure(err)];
     }
     log.error(`${verb} failed`, { reason: errorMessage(err) });
     return [null, STATUS_ERROR, errorMessage(err)];
