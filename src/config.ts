@@ -36,6 +36,16 @@ export interface EngineConfig {
     readonly defaultLifetimeSecs: number;
 
     readonly port: number;
+
+    /**
+     * Shared secret the intake engine presents on `/validate`, as `x-intake-token`.
+     *
+     * Optional, and unset means no check — a local dev run should not need a secret. But `/validate`
+     * is the call that decides whether an escrow pays out, so on any host where the port is not
+     * strictly loopback this should be set on both sides. The intake engine already sends the
+     * header whenever its own `INTAKE_INTERNAL_TOKEN` is set.
+     */
+    readonly internalToken: string | undefined;
 }
 
 export class ConfigError extends Error {
@@ -117,6 +127,7 @@ export function loadConfig(): EngineConfig {
         defaultLifetimeSecs: numberEnv('DEFAULT_LIFETIME_SECS', 3600),
 
         port: numberEnv('TEE_PORT', 3000),
+        internalToken: process.env['INTAKE_INTERNAL_TOKEN'] || undefined,
     };
 }
 

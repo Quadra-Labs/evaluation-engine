@@ -19,6 +19,7 @@
  */
 
 import { createServer, type IncomingMessage, type Server, type ServerResponse } from 'node:http';
+import { timingSafeEqual } from 'node:crypto';
 import type { Hex } from 'viem';
 import { EngineError, statusFor } from './errors.js';
 import { errorMessage, log } from './log.js';
@@ -32,6 +33,30 @@ import type { ChainReader } from './chain/reads.js';
 
 /** Bodies are two hex ids at most. Anything larger is a mistake or an attempt. */
 const MAX_REQUEST_BYTES = 4096;
+
+/**
+ * The POST routes that move money or write reputation, and so require `x-intake-token` when a token
+ * is configured.
+ *
+ * The GET routes are deliberately excluded: `/health`, `/pubkey` and `/attestation` publish facts
+ * that are already public on chain, and `/pubkey` in particular must stay open because every buyer
+ * needs it to seal a delivery. Gating it would break job creation to protect nothing.
+ */
+const GUARDED_ROUTES = new Set(['/validate', '/score-job', '/score-market', '/settle-competition']);
+
+/**
+ * Compare in constant time, so a wrong token cannot be recovered byte by byte from response timing.
+ *
+ * `timingSafeEqual` throws on a length mismatch, which would leak the length through the error path,
+ * so the lengths are checked first and a mismatch is reported as a plain failure.
+ */
+function tokenMatches(expected: string, provided: string | undefined): boolean {
+    if (provided === undefined) return false;
+    const a = Buffer.from(expected, 'utf8');
+    const b = Buffer.from(provided, 'utf8');
+    if (a.length !== b.length) return false;
+    return timingSafeEqual(a, b);
+}
 
 export interface ServiceDeps {
     readonly engine: Engine;
@@ -123,7 +148,21 @@ export function makeService(deps: ServiceDeps): Server {
         };
     }
 
-    async function route(method: string, path: string, body: string): Promise<[number, unknown]> {
+    async function route(
+        method: string,
+        path: string,
+        body: string,
+        token: string | undefined,
+    ): Promise<[number, unknown]> {
+        // Before any work, and before the body is even looked at. `/validate` is what releases an
+        // escrow, so an unauthenticated caller must not be able to spend enclave time either.
+        const expected = deps.config.internalToken;
+        if (expected !== undefined && method === 'POST' && GUARDED_ROUTES.has(path)) {
+            if (!tokenMatches(expected, token)) {
+                return [401, { error: 'x-intake-token missing or wrong', kind: 'unauthorized' }];
+            }
+        }
+
         if (method === 'GET' && path === '/health') return [200, await health()];
 
         if (method === 'GET' && path === '/pubkey') {
@@ -182,7 +221,9 @@ export function makeService(deps: ServiceDeps): Server {
             const started = Date.now();
             try {
                 const body = method === 'POST' ? await readBody(req) : '';
-                const [status, payload] = await route(method, path, body);
+                const header = req.headers['x-intake-token'];
+                const token = Array.isArray(header) ? header[0] : header;
+                const [status, payload] = await route(method, path, body, token);
                 send(res, status, payload);
                 log.debug('request', { method, path, status, ms: Date.now() - started });
             } catch (err) {

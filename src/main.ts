@@ -114,7 +114,16 @@ async function boot(): Promise<void> {
             port: config.port,
             chainId: config.chainId,
             tee: identity.address,
+            // Says which one is true rather than only complaining about the unset case, so an
+            // operator who believes they configured a token can confirm it from the boot line.
+            validateAuth: config.internalToken === undefined ? 'none' : 'x-intake-token',
         });
+        if (config.internalToken === undefined) {
+            log.warn(
+                'INTAKE_INTERNAL_TOKEN is unset: /validate, /score-job, /score-market and ' +
+                    '/settle-competition are unauthenticated. Fine on loopback, not on a shared host',
+            );
+        }
     });
 
     // Graceful shutdown so an in-flight settlement finishes rather than being cut mid-signature.
