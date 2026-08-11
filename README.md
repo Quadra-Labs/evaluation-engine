@@ -1,194 +1,209 @@
 # Quadra evaluation engine
 
-Quadra scores every job inside a single Sui Nautilus enclave, which is a secure box on AWS
-Nitro. One enclave image serves every evaluator category and dispatches each job by its
-`category_id`. Keeping all the scoring code, the outbound network allow list, and the PCR
-measurements in one image means there is one engine to deploy, one enclave identity to register
-on-chain, and one URL the scheduler and competition engine route to.
+The only Quadra workload that runs inside a TEE. It decrypts sealed agent submissions, resolves
+ground truth from Flare's FTSO anchor feeds, scores, and signs a settlement that `JobEscrow` and
+`SealedCompetition` verify on chain.
 
-The categories fall into two families.
+It holds one secret and produces one kind of artifact. Everything else — deciding what is due,
+paying gas, submitting transactions — belongs to callers that hold no key and can forge nothing.
 
-The finance evaluators (all `category: finance`) predict a curated asset's price:
+## What runs privately, and what the chain checks
 
-| evaluator_id                 | agent output                       | scoring |
-| ---------------------------- | ---------------------------------- | --- |
-| `price-range-guess`          | `{ minPrice, maxPrice }`           | end price in band -> 100, else decay vs a **start-price-relative, sqrt(lifetime)-scaled** tolerance |
-| `up-down-guess`              | `{ isUp, confidence in [0.5,1] }`  | Brier `(p_up - outcome)^2` mapped to [0,100] |
-| `movement-percentage-guess`  | `{ percentage }`                   | gentle decay of `|guess - actual%|` (no cliff) |
-| `portfolio-roi`              | `{ trades }`                       | a `u64` ROI **metric** (not a [0,100] score), recorded as performance |
+**What is private inside the TEE.** The secp256k1 key, generated inside the Confidential Space
+container at boot and never exported — `keys.ts` refuses to start if a key is supplied from the
+environment when `SIMULATE_ATTESTATION=false`, and the image's launch policy deliberately omits
+`TEE_PRIVATE_KEY` from the overridable set, so not even an operator editing VM metadata can inject
+one. Everything sealed to that key: each buyer's delivered result, and every competition entry
+before settlement. And the scoring itself — the enclave sees plaintext, the chain never does.
 
-The first three predict a curated asset (BTC, ETH, SOL, SUI for now -- see `src/asset.rs`). The
-price at **delivery** (start_price) is captured via `/start_data` and scored against the price at
-**resolution** (`started_at + lifetime`). Prices are 1e-8 fixed-point integers so cheap assets and
-percentage math stay precise and integer-only. `portfolio-roi` is a PERFORMANCE evaluator: it signs
-a `u64` ROI metric with a distinct intent scope, so it can never be replayed as a `[0,100]` score.
+**What is verified on chain.** Two independent things, and it matters that they are separate:
 
-The prediction evaluators resolve ground truth from Polymarket's Gamma and CLOB APIs (not Pyth) and
-read `market_id`, `event_id`, and `target_ts` from the job `params`:
+- _Identity._ `TeeRegistry.register` verifies a Google-signed Confidential Space attestation JWT in
+  Solidity (RS256 against a mirrored JWKS), requires the attested `submods.container.image_digest`
+  to equal the digest the registry pins, and binds the key only if the token's `eat_nonce` equals
+  `keccak256(wallet, pubkey)` — so a captured token cannot bind any other key.
+- _Each settlement._ The EIP-712 signature recovers to `activeTeeWallet`; `FtsoLib.checkGroundTruth`
+  re-verifies the FTSO anchor-feed Merkle proof and requires it to equal the signed
+  `groundTruthValue`; `keccak256(receipt)` must equal the anchored receipt hash. `quadra-verify`
+  replays all of it from public data.
 
-| evaluator_id            | agent output                  | scoring |
-| ----------------------- | ----------------------------- | --- |
-| `polymarket-resolution` | `{ outcome }`                 | 100 if `outcome` matches the market's resolved winner, else 0 |
-| `polymarket-event`      | `{ guesses }` (JSON array)    | coverage-weighted: correct guesses over the event's total markets, mapped to [0,100] |
-| `polymarket-price`      | `{ probability }` in [0,1]    | Brier closeness of `probability` to the real CLOB YES price at `target_ts` |
+**Trust assumptions, stated rather than implied.**
 
-## How the engine is laid out
+1. The JWKS is mirrored on chain by the contract owner, not fetched from Google. A compromised
+   owner could install a key they control. This is the residual trust Flare Confidential Compute
+   removes by replacing it with data-provider consensus, which is why `registerFccTee` remains a
+   third path rather than dead code.
+2. The image digest pin is only as strong as the build's reproducibility. Base images are not yet
+   pinned by digest ([BUGS.md 24](../_migration/BUGS.md)), so today the digest attests that _some_
+   image ran, not that this published source did.
+3. Anyone who runs the same public image in their own Confidential Space project can mint a valid
+   token for their own enclave. Not a confidentiality break — their enclave runs this code — but a
+   griefing surface, closed by pinning `VTPM_SUB_PREFIX` to your GCP project.
+4. `portfolio-roi` settlements pin only one of a portfolio's feeds; the rest rest on the TEE
+   signature alone.
 
-Everything compiles into one binary; a top-level dispatcher routes by `category_id`:
+**Why this needs confidential compute rather than a smart contract.** The product is a market for
+forecasts, and a forecast is worth nothing once everyone can read it. On a public chain the scoring
+inputs would be public the moment they were submitted: a competition entrant could read every rival
+entry before the deadline and submit a strictly better one, and a buyer's paid result would be
+readable by anyone who never paid. Commit-reveal fixes the first and not the second — the buyer's
+result must stay private _permanently_, not just until settlement. So the requirement is a place
+that can hold a decryption key, read the plaintext, and still be trusted by a contract that cannot
+see any of it. That is exactly a TEE: the enclave decrypts, scores, and hands back a signed
+statement the chain verifies against an attested identity and an independent oracle proof.
 
-```
-src/nautilus-server/
-  Cargo.toml                         # one no-op `evaluation` feature (default); selects nothing
-  src/
-    main.rs                          # axum router: /validate /process_data /start_data /health_check
-    app.rs                           # top-level dispatcher: peek category_id -> finance or prediction
-    common.rs                        # shared IntentMessage, signing, attestation, health check
-    job.rs                           # shared job envelope + validation
-    asset.rs                         # curated asset -> Pyth feed-id map (finance)
-    oracle.rs                        # Pyth Hermes fetch, fixed-point (1e-8) prices (finance)
-    scoring/                         # Scorer trait + the three finance score scorers
-      mod.rs price_range.rs up_down.rs movement_pct.rs
-    apps/
-      finance/                       # finance sub-engine: dispatches score categories + portfolio-roi
-        mod.rs score.rs portfolio.rs roi.rs
-      polymarket/                    # prediction sub-engine: the three polymarket-* categories
-        mod.rs score.rs client.rs
-      evaluation/
-        allowed_endpoints.yaml       # the one outbound allow list (Pyth + Polymarket hosts)
-```
+## What changed from the Sui version
 
-`app.rs` peeks `payload.category_id` on the untyped body and forwards the request to the finance or
-prediction sub-engine. Both sub-engines expose Value-based `validate_input` / `process_data`
-handlers and re-deserialize the body into their own typed job (the peek must come first, because
-`PortfolioJob` and `PredictionJob` both flatten the job envelope). Each sub-engine still rejects any
-category outside its set as a backstop.
+The `sui` branch is a Rust binary compiled by StageX into an AWS Nitro enclave image, identified by
+three PCR measurements registered on Sui, signing BCS `IntentMessage` blobs with a boot-generated
+ed25519 key. None of that substrate exists on Flare. The rewrite changes five things that matter:
 
-## The job in, the score out
+|              | Sui (`sui` branch)                  | Flare (`main`)                                                 |
+| ------------ | ----------------------------------- | -------------------------------------------------------------- |
+| Runtime      | Rust / axum in an AWS Nitro EIF     | TypeScript on Node 22 in a Confidential Space container        |
+| Identity     | 3 PCRs in `enclave::EnclaveConfig`  | container code hash, registered in `TeeRegistry`               |
+| Signature    | ed25519 over BCS `IntentMessage<T>` | secp256k1 EIP-712, or an FCC `TEE_ACTION_RESULT`               |
+| Ground truth | Pyth Hermes, fetched over vsock     | FTSO anchor feeds with a Merkle proof the contract re-verifies |
+| Input        | the caller POSTs a decrypted job    | the engine reads the chain itself and decrypts the sealed blob |
 
-A job is POSTed to `/process_data` wrapped in `{ "payload": { ... } }`. A finance score job:
+The last row is the substantive one. On Sui the caller decrypted the agent's result with Seal and
+handed the enclave a finished plaintext job, so the enclave was a pure scorer and the caller saw
+everything. Here the submission is encrypted to the TEE's own key and nobody else can read it.
 
-```json
-{
-  "payload": {
-    "agent_id": "0xab...ab",
-    "category_id": "price-range-guess",
-    "job_id": "job-1",
-    "asset": "BTC",
-    "agent_result":     { "minPrice": 60000, "maxPrice": 60100 },
-    "job_template":     { "output": { "minPrice": "number", "maxPrice": "number" }, "lifetime": "5m" },
-    "start_data":       { "start_price": 6000000000000 },
-    "started_at_ms":    1700000000000,
-    "delivered_at_ms":  1700000060000
-  }
-}
-```
+Two smaller corrections came with the port, both deliberate:
 
-`asset` selects the price feed; `start_data.start_price` is the 1e-8 fixed-point price captured at
-delivery (from `/start_data`). Both are added by the scheduler. A polymarket job carries no `asset`
-and no `start_data`; instead it has `params` (the fixed competition values the evaluator resolves
-against Polymarket) and an informational `window`.
+- **The start price is no longer caller-supplied.** Sui's `/start_data` endpoint let the scheduler
+  capture a price at delivery time and feed it back into `/process_data`, where the enclave used it
+  verbatim. Both the price-range and movement-percentage scorers scale their entire tolerance off
+  that number, so it was forgeable by whoever posted the job. The engine now re-derives both ends
+  from the DA layer itself.
+- **Errors are classified.** The Sui engine returned HTTP 400 for everything, so a transient oracle
+  outage looked exactly like a malformed job. See the status codes below.
 
-Notes:
+## How the enclave is bound, and how it signs
 
-- There is no `finalized_result` in the request. The engine resolves the real value itself (from
-  Pyth for finance, from Polymarket for prediction), so the caller can not forge it.
-- `agent_result` is free-form JSON. Only the category's scorer knows how to read it.
-- `agent_id` is a `0x` Sui address (32 bytes), signed back as raw bytes so it lines up with a Move
-  `address` on the verifier.
-- Timestamps are epoch milliseconds, not ISO strings. This keeps the enclave free of a date parsing
-  dependency and the build deterministic.
+The same scoring code serves both signing paths, so they cannot produce different scores. What
+differs is who holds the key and who vouches for the enclave.
 
-The enclave validates the job, scores it, and signs the result:
+**EIP-712 on GCP Confidential Space — the path this ships on.** The engine runs alone inside an
+AMD SEV-SNP confidential VM. It generates its secp256k1 key at boot, signs a `JobSettlement` or
+`Settlement` typed-data digest, and the market recovers the signer against
+`TeeRegistry.activeTeeWallet()`. The binding is `TeeRegistry.register`, which verifies a
+Google-signed attestation on chain before it will trust the key. See
+[docs/deploy.md](docs/deploy.md).
 
-```json
-{
-  "response": {
-    "intent": 0,
-    "timestamp_ms": 1700000061000,
-    "data": { "agent_id": [171, "..."], "category_id": "price-range-guess", "job_id": "job-1", "score": 100, "finalized_price": 6050000000000 }
-  },
-  "signature": "<hex ed25519 over bcs(IntentMessage{intent, timestamp_ms, data})>"
-}
-```
+**FCC `TEE_ACTION_RESULT`.** The engine runs as a Flare Compute Extension behind Flare's TEE node
+and holds no key at all: decryption goes to the node's `/decrypt` port and the node signs the
+result, which a relayer submits into `scoreJobFromTee` / `settleFromTee`. It is written and
+unexercised — standing it up needs Coston2 indexer credentials and a named tunnel from Flare, both
+with external lead time.
 
-`intent` is `0` for a score and `1` for the `portfolio-roi` metric. The signed BCS layout is the
-contract the on-chain verifier depends on, so it does not change.
+`setActiveTee` also exists and is development only: an owner transaction asserting a key belongs to
+an enclave, with nothing verifying that claim. It is how the stack ran before a VM existed.
 
-## Validation order
+## HTTP surface
 
-1. `ensure_category` rejects any job whose `category_id` the engine does not serve.
-2. `ensure_timely` rejects deliveries that landed after `started_at_ms` plus the template
-   `lifetime`.
-3. `validate_output_schema` rejects an `agent_result` that does not carry every field the template
-   promised, with the right JSON type.
-4. The engine resolves the ground truth (Pyth at the resolution time for finance; Polymarket for
-   prediction), rejecting the job if that value is not available yet.
-5. The scorer reads `agent_result` plus the resolved ground truth and returns the score.
+The EIP-712 service listens on `TEE_PORT` (default 3000).
 
-## Two purposes: validate, then score
+| Route                      | Body                | Returns                                                |
+| -------------------------- | ------------------- | ------------------------------------------------------ |
+| `GET /health`              |                     | liveness, the bound addresses, DA-layer reachability   |
+| `GET /pubkey`              |                     | `{ address, publicKey }`, the key agents seal to       |
+| `GET /attestation`         |                     | `{ token, address }`                                   |
+| `POST /validate`           | `{ jobId }`         | did the agent deliver something well formed — unsigned |
+| `POST /score-job`          | `{ jobId }`         | a signed `scoreJob` argument set                       |
+| `POST /settle-competition` | `{ competitionId }` | a signed `settle` argument set                         |
+| `POST /score-market`       | `{ jobId }`         | a prediction-market score, unsigned and not settleable |
 
-The engine serves both halves of a job's life:
+`/score-job` and `/settle-competition` return everything the caller needs to submit the transaction
+and nothing it needs to trust: the signature is over the whole settlement, so a relayer cannot alter
+a score, a ground-truth value or an entry list without invalidating it. All integers cross the wire
+as decimal strings.
 
-- **`POST /validate`** -- input validation only (steps 1-3; no oracle, no scoring). Same
-  `{ "payload": { ... } }` body as `/process_data`. Returns `{ "valid": true, "job_id": ... }`, or a
-  400 with the rejection reason. The scheduler's validator calls this when an agent claims delivery,
-  so intake can release payment without reading the sealed result. The response is unsigned:
-  validation only gates payment, scores are the signed, verifiable artifact.
-- **`POST /process_data`** -- the full pipeline (steps 1-5) at lifetime end, called by the scheduler
-  engine; returns the enclave-signed score or metric.
-- **`POST /start_data`** -- the delivery-price snapshot for the finance score categories
-  (asset-keyed). `portfolio-roi` and the polymarket categories do not use it.
+Status codes: `400` the caller or the agent is at fault, `409` not resolvable yet or already
+terminal, `502` the DA layer or the RPC failed, `503` no chain configured.
 
-## Adding a new category
+`/validate` is deliberately unsigned. It answers "was this well formed", not "was it correct", and
+payment is released on the first question alone — an agent that did honest work on time gets paid
+even if the market moved against it.
 
-1. Finance score category: add the scorer in `src/scoring/<id>.rs` (implement the `Scorer` trait,
-   set its `category_id`), register it in `apps/finance/mod.rs::build_registry()`, add the id to
-   `SCORE_CATEGORIES`, and make sure every asset it needs is in `src/asset.rs`.
-2. Prediction category: add the constant + a `score_*` function in `apps/polymarket/`, add the id to
-   `PREDICTION_CATEGORIES`, and dispatch it in `process`.
-3. If the category needs a new outbound host, add it to `apps/evaluation/allowed_endpoints.yaml`.
-4. Register the new `evaluator_id` in the Walrus `eval_engines` catalog pointing at this one engine
-   URL (see below).
+The FCC extension serves `POST /action` and `GET /state` on `EXTENSION_PORT` (default 7702), with
+the same three verbs as `(opType, opCommand)` pairs: `EVALUATION/VALIDATE`, `EVALUATION/SCORE_JOB`,
+`EVALUATION/SETTLE_COMP`.
 
-## Build, run, test
+## Evaluators
 
-One engine, one build. The `evaluation` feature is the default and is a no-op label kept only so the
-deterministic enclave build command keeps a stable shape.
+Scoring is a lookup, not a chain of `if`s. `quadra-core`'s scorer registry is the single dispatch
+point and the verifier uses the same one, so an evaluator the engine can score is an evaluator
+anyone can re-derive.
 
-Local development (runs anywhere, no AWS, fresh key per boot):
+| Evaluator                                     | Scores                                                                       | Settles as                   |
+| --------------------------------------------- | ---------------------------------------------------------------------------- | ---------------------------- |
+| `price-range-guess`                           | did the price land in the band, scaled by volatility over the job's lifetime | job or competition           |
+| `up-down-guess`                               | integer Brier score over a confidence in [50,100]                            | job or competition           |
+| `movement-percentage-guess`                   | Lorentzian decay on the error in basis points                                | job or competition           |
+| `portfolio-roi`                               | `PERF_BASE + roi_bps` from a start allocation and a trade list               | performance competition only |
+| `polymarket-resolution` / `-event` / `-price` | market outcome and price accuracy                                            | not settleable yet           |
 
-```bash
-cd src/nautilus-server
-RUST_LOG=info cargo run                 # serves all categories on :3000 (PORT overrides)
-cargo test
-```
+Two limits are structural rather than unfinished work:
 
-Enclave image and PCRs (needs an AWS Nitro capable host):
+- `portfolio-roi` produces a `uint64` metric around 1e6, which fits `SealedCompetition`'s
+  `EntryInput.score` and `KIND_PERFORMANCE` but not `scoreJob`'s `uint8`. Its settlement can pin
+  only one FTSO feed, so the on-chain oracle cross-check covers one asset of a multi-asset
+  portfolio. That is weaker than the price evaluators and is stated rather than hidden.
+- The `polymarket-*` evaluators have no FTSO feed at all. Every settlement path calls
+  `FtsoLib.checkGroundTruth`, which requires an anchor-feed proof matching the signed value, so
+  `POST /score-market` runs the whole path — read the chain, decrypt, query Gamma or the CLOB,
+  score — and stops at the settlement, unsigned, saying why. Landing them for real needs an FDC
+  `Web2Json` verification path in `contracts`. Attaching an unrelated feed's proof would satisfy
+  the contract and be a lie the verifier would faithfully confirm.
 
-```bash
-make ENCLAVE_APP=evaluation             # builds out/nitro.eif + out/nitro.pcrs
-cat out/nitro.pcrs                       # PCR0/1/2 for this engine build
-make run-debug                           # debug build, all-zero PCRs, for development only
-```
+## Units
 
-`configure_enclave.sh evaluation` reads `src/nautilus-server/src/apps/evaluation/allowed_endpoints.yaml`
-and wires the vsock-proxy forwarders for Pyth Hermes and the two Polymarket hosts.
+Prices are integers in 1e-8 fixed point (`PRICE_DECIMALS = 8`) everywhere — in submissions, in the
+scorers, in the receipt and in `groundTruthValue`. An FTSO anchor feed carries its own `decimals`
+(BTC/USD reads 2 at current prices, because `FeedData.value` is an `int32`), and
+`normalizeToPrice` bridges that to the canonical unit using the same formula
+`FtsoLib.normalizedPrice` uses on chain. A disagreement here mis-scales every price by a power of
+ten, so both sides derive it from one place.
 
-## Register the engine
+All scoring is integer arithmetic on `bigint`. Floating point would drift by a score point on
+boundaries, and the score is signed.
 
-There is one engine URL. Register every `evaluator_id` it serves to that same URL in the Walrus
-`eval_engines` catalog, from the `data/` package, after the gateway is running:
+## Development
 
 ```bash
-cd ../data
-for id in price-range-guess up-down-guess movement-percentage-guess portfolio-roi \
-          polymarket-resolution polymarket-event polymarket-price; do
-  EVALUATOR_ID=$id \
-  ENCLAVE_URL=http://host:port \
-  ENCLAVE_OBJECT_ID=0x... \   # optional in local dev
-  npm run register-eval-engine
-done
+pnpm install
+pnpm typecheck
+pnpm dev                 # the EIP-712 service on TEE_PORT
+pnpm dev:fcc             # the FCC extension on EXTENSION_PORT
+pnpm register-tee        # bind this instance's key into TeeRegistry (dev path)
 ```
 
-Do **not** add the URL to `.env` -- the scheduler and competition engine load the catalog
-dynamically and refresh when the pointer advances.
+Addresses are never hardcoded. `quadra-core/deployments` resolves them from
+`contracts/deployments/<chainId>.json` by walking up from this checkout, so a redeploy needs no
+change here. Copy `.env.example` to `.env` for the rest.
+
+`quadra-core` is vendored as a tarball in `vendor/` rather than referenced across the repo
+boundary, because this package becomes the TEE image and the image hash is the on-chain identity.
+Re-vendor with `pnpm vendor:core` after any change in `data`, and re-register the code version
+afterwards.
+
+## Layout
+
+```
+src/
+  main.ts server.ts config.ts log.ts   the EIP-712 service
+  keys.ts attestation.ts               TEE identity and its proof
+  decrypt.ts validate.ts               opening sealed deliveries, and the intake gate
+  score.ts settlement.ts resolve.ts    scoring, receipts, signing, argument assembly
+  evaluators/                          the evaluators quadra-core cannot hold (I/O or non-price)
+  chain/                               Coston2 reads and the TeeRegistry write
+  http/                                capped, retrying outbound fetch
+  fcc/base/                            the FCC wire contract, ported verbatim
+  fcc/app/                             our three handlers
+```
+
+`fcc/base/` is ported from Flare's `fce-extension-scaffold` and is not ours to redesign. The
+`ActionResult` JSON is what the node hashes and signs, so field order, field presence and the
+absence of whitespace are all load-bearing.
