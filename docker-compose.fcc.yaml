@@ -1,0 +1,89 @@
+# The local FCC stack: Flare's extension proxy, its redis, and our TEE container.
+#
+# Only ONE of these three is ours. `ext-proxy` and `redis` are Flare's, built from the
+# `fce-extension-scaffold` checkout named by SCAFFOLD_DIR, and they are here because an extension
+# cannot be exercised without them: the proxy is what data providers push instructions to and what
+# results are read back from.
+#
+# THE TUNNEL IS THE PART THAT BITES. Host port 6674 is the proxy's EXTERNAL port and the one that
+# must be reachable over HTTPS, because its URL is written ON CHAIN during `register-tee`. A quick
+# tunnel mints a new hostname every restart, so the registered URL silently stops resolving and the
+# machine never receives an instruction again — with no error anywhere, just an empty queue. Use a
+# NAMED Cloudflare tunnel or a reserved ngrok domain, and re-run post-build whenever it changes.
+#
+# See docs/deploy.md for the full sequence.
+
+name: quadra-evaluation-engine
+
+services:
+    redis:
+        image: redis:7-alpine
+        restart: unless-stopped
+        ports:
+            - '6382:6379'
+        command: ['redis-server', '--save', '', '--appendonly', 'no']
+
+    ext-proxy:
+        build:
+            context: ${SCAFFOLD_DIR:?set SCAFFOLD_DIR to your fce-extension-scaffold checkout}/proxy
+            dockerfile: Dockerfile
+            args:
+                # Pinned in the scaffold's own Dockerfile. It MUST stay aligned with the tee-node
+                # version the image below is built from: the two share a wire format that changes
+                # while FCC is in development, and a skew surfaces as
+                # "fetching initial TEE info: hex string without 0x prefix" or as
+                # "verifying response signature: invalid signature" rather than as a version
+                # warning. Never bump one side alone.
+                TEE_PROXY_VERSION: ${TEE_PROXY_VERSION:-}
+        restart: unless-stopped
+        depends_on:
+            - redis
+        ports:
+            # internal: the extension container talks to the proxy on this one
+            - '6673:6663'
+            # external: THE TUNNEL TARGET. This is the port whose public URL goes on chain.
+            - '6674:6664'
+        volumes:
+            # Coston2 indexer database credentials, obtained from Flare support. Gitignored; the
+            # .example beside it is tracked.
+            - ./config/proxy/extension_proxy.coston2.docker.toml:/app/config/extension_proxy.toml:ro
+        environment:
+            PROXY_PRIVATE_KEY: ${PROXY_PRIVATE_KEY:?}
+            REDIS_URL: redis://redis:6379
+
+    extension-tee:
+        build:
+            context: .
+            dockerfile: Dockerfile.fcc
+            args:
+                TEE_NODE_REF: ${TEE_NODE_REF:-latest}
+                # A fixed date, not `now`. This is what makes two builds of the same source produce
+                # the same digest, which is what makes the code hash registered on chain mean
+                # anything at all.
+                SOURCE_DATE_EPOCH: ${SOURCE_DATE_EPOCH:-1735689600}
+        restart: unless-stopped
+        depends_on:
+            - ext-proxy
+        environment:
+            # Simulated attestation against the LIVE chain. Only the attestation is simulated: the
+            # contracts, the data providers and the instruction flow are all real.
+            MODE: ${MODE:-1}
+            PROXY_URL: http://ext-proxy:6663
+            EXTENSION_ID: ${EXTENSION_ID:?run the scaffold's pre-build.sh first}
+            INITIAL_OWNER: ${INITIAL_OWNER:?}
+            CHAIN_URL: ${CHAIN_RPC_URL:-https://coston2-api.flare.network/ext/C/rpc}
+            CHAIN_RPC_URL: ${CHAIN_RPC_URL:-https://coston2-api.flare.network/ext/C/rpc}
+            CHAIN_ID: ${CHAIN_ID:-114}
+            # Left unset these resolve from contracts/deployments/<chainId>.json, which is NOT in
+            # the image — so inside the container they must be set explicitly.
+            JOB_ESCROW: ${JOB_ESCROW:?}
+            SEALED_COMPETITION: ${SEALED_COMPETITION:?}
+            TEE_REGISTRY: ${TEE_REGISTRY:?}
+            FROM_BLOCK: ${FROM_BLOCK:-0}
+            DA_URL: ${DA_URL:-https://ctn2-data-availability.flare.network}
+            DA_API_KEY: ${DA_API_KEY:-}
+            DEFAULT_FEED: ${DEFAULT_FEED:-BTC/USD}
+            DEFAULT_LIFETIME_SECS: ${DEFAULT_LIFETIME_SECS:-3600}
+            # Reported by the proxy's /info and recorded in every receipt.
+            TEE_CODE_HASH: ${TEE_CODE_HASH:-}
+            LOG_LEVEL: ${LOG_LEVEL:-info}

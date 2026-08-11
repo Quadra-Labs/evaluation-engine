@@ -1,0 +1,26 @@
+# Copy to extension_proxy.coston2.docker.toml and fill in the credentials.
+#
+# The extension proxy reads Coston2 through Flare's indexer database rather than through an RPC
+# node, so it cannot start without these. They are READ-ONLY credentials and they are obtained from
+# Flare technical support or @FlareDevs — there is no self-service path and no public default.
+#
+# Two things worth knowing before you ask:
+#   - Coston2 access does NOT require a VPN. Coston (the other testnet) does, and uses different
+#     credentials. FCC development is on Coston2; target that one.
+#   - Credentials embedded in older repository documents have been rotated, and the host they name
+#     is not the one Coston2 uses. The host below is the current one.
+#
+# The real file is gitignored. Do not commit it, and do not paste it into an issue.
+
+[db]
+host = "34.38.42.208"
+port = 3306
+database = "indexer"
+username = "<your-indexer-db-username>"
+password = "<your-indexer-db-password>"
+log_queries = false
+
+# Chain id 114 and the Coston2 system contract addresses come from the scaffold's own
+# config/coston2/deployed-addresses.json. Take them from there rather than from a guide: FCC is
+# still in development and a redeploy can retire an address, which surfaces as
+# FunctionNotFound(bytes4) or as a register() that reverts with no reason.
