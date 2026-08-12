@@ -12,8 +12,9 @@
  *
  * AN AGENT FAULT IS A ZERO, NOT AN EXCEPTION. A submission that will not decrypt, or decrypts to
  * nonsense, scores zero and settles. Throwing would let one hostile entry hold a whole
- * competition's prize pool hostage. The reason is recorded in the receipt entry so the zero is
- * explicable rather than mysterious.
+ * competition's prize pool hostage. The reason rides in `ReceiptEntry.reason` so the zero is
+ * explicable rather than mysterious — and an agent that took part but reached no entry at all is
+ * named in `Receipt.omitted`, which is the only attested record a forfeiting staker gets.
  *
  * AN ORACLE FAULT IS AN EXCEPTION. A non-positive start price is NOT the agent's doing, and
  * scoring it zero would punish an agent for the DA layer having a bad round. quadra-core's scorer
@@ -32,7 +33,14 @@
  * fail here — it fails as a reverted settlement after the TEE has already signed it.
  */
 
-import { receiptHash, receiptBytes, scorerFor, type Receipt, type ReceiptEntry } from 'quadra-core';
+import {
+    receiptHash,
+    receiptBytes,
+    scorerFor,
+    type Receipt,
+    type ReceiptEntry,
+    type OmittedEntry,
+} from 'quadra-core';
 import { competitionDomain, competitionTypes, jobDomain, jobTypes } from 'quadra-core';
 import { settlementDigest, jobSettlementDigest } from 'quadra-core';
 import { sign } from 'viem/accounts';
@@ -53,6 +61,36 @@ export interface DecryptedEntry {
     readonly agent: Address;
     readonly ciphertextHash: Hex;
     readonly revealed: Record<string, string>;
+    /**
+     * Set when the bytes could not be turned into a submission — an unopenable payload or an empty
+     * one. It takes precedence over anything the scorer says, because the scorer only ever saw the
+     * empty object this fault produced and its verdict would describe a missing field rather than
+     * the reason the field is missing.
+     */
+    readonly fault?: string;
+}
+
+/**
+ * Sort `omitted` by lowercased address and drop the key when empty.
+ *
+ * The receipt is a hash preimage, so the order has to come from the data rather than from the order
+ * events happened to arrive in — two enclaves replaying the same competition must produce the same
+ * bytes. Empty means "nobody was left out", which is the shape every receipt had before this field
+ * existed and must keep serializing as.
+ */
+function omittedField(
+    omitted: readonly OmittedEntry[] | undefined,
+): { omitted: readonly OmittedEntry[] } | undefined {
+    if (omitted === undefined || omitted.length === 0) return undefined;
+    const sorted = [...omitted].sort((a, b) =>
+        a.agent.toLowerCase() < b.agent.toLowerCase() ? -1 : 1,
+    );
+    return { omitted: sorted };
+}
+
+/** The `reason` key, present only when there is one. An empty reason is not a reason. */
+function reasonField(reason: string | undefined): { reason: string } | undefined {
+    return reason ? { reason } : undefined;
 }
 
 export class OracleFaultError extends Error {
@@ -123,6 +161,8 @@ export interface JobResultInput {
     readonly teeImageDigest: string;
     /** Unix seconds this settlement was produced. Recorded in the receipt. */
     readonly resolvedAtSecs: number;
+    /** Why the delivery could not be read, when it could not. See `DecryptedEntry.fault`. */
+    readonly fault?: string;
 }
 
 export interface UnsignedJobSettlement {
@@ -139,7 +179,7 @@ export interface UnsignedJobSettlement {
 
 export function buildJobResult(input: JobResultInput): UnsignedJobSettlement {
     assertUsableWindow(input.window, input.evaluatorId);
-    const { score } = scoreOne(input.evaluatorId, input.revealed, input.window);
+    const { score, reason } = scoreOne(input.evaluatorId, input.revealed, input.window);
 
     const entry: ReceiptEntry = {
         agent: input.agent,
@@ -147,6 +187,11 @@ export function buildJobResult(input: JobResultInput): UnsignedJobSettlement {
         // Empty on purpose. See the header: this receipt is published on chain.
         revealed: {},
         score,
+        // The fault wins over the scorer's reason: a delivery that never opened reaches the scorer
+        // as `{}`, so the verdict would say a field is missing rather than that nobody could read
+        // the payload — and `undecryptable-payload` is usually OUR fault (a rotated enclave key),
+        // which is the one case a buyer reading this receipt most needs distinguished from a zero.
+        ...reasonField(input.fault ?? reason),
     };
 
     // `competitionId` doubles as the job id — one Receipt type covers both markets, and a job is
@@ -184,6 +229,12 @@ export interface CompetitionResultInput {
     readonly window: ResolvedWindow;
     readonly teeImageDigest: string;
     readonly resolvedAtSecs: number;
+    /**
+     * Agents that took part and are in no entry — a submitter that never staked, bytes that could
+     * not be recovered, a staker that never submitted. The settlement cannot name them, so the
+     * receipt is the only place they can appear at all.
+     */
+    readonly omitted?: readonly OmittedEntry[];
 }
 
 export interface SettlementEntry {
@@ -260,7 +311,7 @@ export function buildCompetitionResult(
     const settlementEntries: SettlementEntry[] = [];
 
     for (const entry of unique) {
-        const { score } = scoreOne(input.evaluatorId, entry.revealed, input.window);
+        const { score, reason } = scoreOne(input.evaluatorId, entry.revealed, input.window);
         if (input.kind === KIND_SCORING && score > 100) {
             // Unreachable through the registered scorers, which clamp. Kept because the failure it
             // guards is expensive and silent-looking: `Passport.record` reverts above 100, so ONE
@@ -277,6 +328,7 @@ export function buildCompetitionResult(
             // what each entrant actually submitted is what makes the ranking checkable by anyone.
             revealed: entry.revealed,
             score,
+            ...reasonField(entry.fault ?? reason),
         });
         settlementEntries.push({ agent: entry.agent, score: BigInt(score) });
     }
@@ -289,6 +341,7 @@ export function buildCompetitionResult(
         startValue: input.window.startValue.toString(),
         lifetimeSecs: input.window.lifetimeSecs,
         entries: receiptEntries,
+        ...omittedField(input.omitted),
         resolvedAt: input.resolvedAtSecs,
     };
 
@@ -312,6 +365,8 @@ export interface PortfolioCompetitionInput {
     readonly resolved: ResolvedPortfolio;
     readonly teeImageDigest: string;
     readonly resolvedAtSecs: number;
+    /** See `CompetitionResultInput.omitted`. */
+    readonly omitted?: readonly OmittedEntry[];
 }
 
 /**
@@ -344,7 +399,12 @@ export function buildPortfolioCompetitionResult(
 
         const submission = parsePortfolioSubmission(entry.revealed);
         let metric = PERF_BASE;
+        // The baseline is a real outcome, not a score — every branch below that keeps it records
+        // WHY, so a reader can tell "held its allocation and the market did not move" apart from
+        // "submitted something nothing could value". Both are PERF_BASE on the leaderboard.
+        let reason = entry.fault ?? '';
         if ('ok' in submission && submission.ok === false) {
+            reason = reason || submission.reason;
             log.warn('portfolio submission did not parse, scoring the flat baseline', {
                 competitionId: input.competitionId,
                 agent: entry.agent,
@@ -358,6 +418,7 @@ export function buildPortfolioCompetitionResult(
             );
             if (verdict.ok) metric = verdict.metric;
             else {
+                reason = reason || verdict.reason;
                 log.warn('portfolio could not be valued, scoring the flat baseline', {
                     competitionId: input.competitionId,
                     agent: entry.agent,
@@ -372,6 +433,7 @@ export function buildPortfolioCompetitionResult(
             revealed: entry.revealed,
             // ~1e6, comfortably inside a JSON number. The settlement carries the bigint.
             score: Number(metric),
+            ...reasonField(reason),
         });
         settlementEntries.push({ agent: entry.agent, score: metric });
     }
@@ -431,6 +493,7 @@ export function buildPortfolioCompetitionResult(
         startValue: window.startValue.toString(),
         lifetimeSecs: window.lifetimeSecs,
         entries: receiptEntries,
+        ...omittedField(input.omitted),
         resolvedAt: input.resolvedAtSecs,
     };
 

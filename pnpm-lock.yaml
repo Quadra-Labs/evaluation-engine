@@ -305,7 +305,7 @@ packages:
     hasBin: true
 
   quadra-core@file:vendor/quadra-core-1.0.0.tgz:
-    resolution: {integrity: sha512-t3zdEr9MOUF7otMFeOFl13ZPWOoT/oOmK2cxF/KMMPmiktcy+Y980Uxkk0dtO4W1vzUjMnWI6UcXSUyDFL5gsg==, tarball: file:vendor/quadra-core-1.0.0.tgz}
+    resolution: {integrity: sha512-B0PHL2c1lGoLq7bGm/dG8iq+XCl63fmQjyaiFUQFwbjkA3gxKMnsfkGdUos++jMjMwQYQ3CIJXG0ithes+NXfA==, tarball: file:vendor/quadra-core-1.0.0.tgz}
     version: 1.0.0
     engines: {node: '>=20.12'}
 

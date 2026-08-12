@@ -45,7 +45,7 @@ import {
     scoreMarket,
     type PortfolioSubmission,
 } from './evaluators/index.js';
-import { decodeJobParams, jobAsset } from 'quadra-core';
+import { decodeJobParams, jobAsset, type OmittedEntry } from 'quadra-core';
 import { validateDelivery, type ValidationVerdict } from './validate.js';
 import type { ChainReader } from './chain/reads.js';
 import { payloadFault, type Decryptors } from './decrypt.js';
@@ -223,6 +223,10 @@ export function makeEngine(deps: EngineDeps): Engine {
             window,
             teeImageDigest: deps.teeImageDigest,
             resolvedAtSecs: now,
+            // The receipt says WHY the zero, not just that it is one. `undecryptable-payload` in
+            // particular is usually ours rather than the agent's, and it is the buyer's only clue
+            // that they are looking at an operational failure and not a bad forecast.
+            ...(fault ? { fault } : {}),
         });
     }
 
@@ -270,6 +274,10 @@ export function makeEngine(deps: EngineDeps): Engine {
         }
 
         const entries: DecryptedEntry[] = [];
+        // Everyone who took part and reaches no entry. The settlement cannot name them — the
+        // contract rejects an entry that never joined or never submitted — so the receipt is the
+        // only artifact that can, and it is signed and anchored like the rest of it.
+        const omitted: OmittedEntry[] = [];
         for (const submission of submissions) {
             // `_recordEntries` reverts `EntryNotJoined`, so an address that submitted without
             // joining takes the whole settlement down with it. Dropping it here is the difference
@@ -280,6 +288,7 @@ export function makeEngine(deps: EngineDeps): Engine {
                     competitionId,
                     agent: submission.agent,
                 });
+                omitted.push({ agent: submission.agent, reason: 'not-joined' });
                 continue;
             }
 
@@ -299,6 +308,7 @@ export function makeEngine(deps: EngineDeps): Engine {
                     fault: 'unrecoverable-tx',
                     note: 'submitSealed must be a DIRECT call: only its hash is stored on chain',
                 });
+                omitted.push({ agent: submission.agent, reason: 'unrecoverable-tx' });
                 continue;
             }
             // An UNOPENABLE entry is a different case and is kept: it is scored, at zero or at the
@@ -316,7 +326,26 @@ export function makeEngine(deps: EngineDeps): Engine {
                 agent: submission.agent,
                 ciphertextHash: submission.ciphertextHash,
                 revealed: revealed ?? {},
+                ...(fault ? { fault } : {}),
             });
+        }
+
+        // A STAKER THAT NEVER SUBMITTED IS RECORDED, NOT FORGOTTEN.
+        //
+        // `_recordEntries` reverts `NoSubmission` for an entry with no commitment, so the
+        // settlement structurally cannot mention such an agent — and on Sui they were visibly
+        // ranked last, because `join_competition` pre-seeded a zero. Here they paid a stake,
+        // forfeited it, and appeared in nothing at all: no entry, no Passport track, no receipt.
+        // The receipt is the one artifact that can carry them, so it does.
+        const submitters = new Set(submissions.map((s) => s.agent.toLowerCase()));
+        for (const joiner of await deps.chain.getJoiners(competitionId, createdAt)) {
+            if (submitters.has(joiner.toLowerCase())) continue;
+            log.warn('an agent staked in and never submitted; the stake is forfeit', {
+                competitionId,
+                agent: joiner,
+                fault: 'no-submission',
+            });
+            omitted.push({ agent: joiner, reason: 'no-submission' });
         }
 
         if (entries.length === 0) {
@@ -353,6 +382,9 @@ export function makeEngine(deps: EngineDeps): Engine {
             const assets = new Set<string>();
             let unparseable = 0;
             let unpriceable = 0;
+            // Which entrant named what, so the receipt can say "SOL has no anchor feed" rather
+            // than leaving a baseline score to be read as a forecast that went nowhere.
+            const unpriceableAssets = new Map<string, string>();
             for (const entry of entries) {
                 const submission = parsePortfolioSubmission(entry.revealed);
                 if ('ok' in submission && submission.ok === false) {
@@ -363,6 +395,7 @@ export function makeEngine(deps: EngineDeps): Engine {
                 const unknown = named.filter((asset) => !hasAnchorFeed(asset));
                 if (unknown.length > 0) {
                     unpriceable++;
+                    unpriceableAssets.set(entry.agent.toLowerCase(), unknown.join(','));
                     log.warn('excluding an entrant that named an asset with no FTSO anchor feed', {
                         competitionId,
                         agent: entry.agent,
@@ -399,10 +432,20 @@ export function makeEngine(deps: EngineDeps): Engine {
             return buildPortfolioCompetitionResult({
                 competitionId,
                 evaluatorId: competition.evaluatorId,
-                entries,
+                entries: entries.map((entry) => {
+                    // An entrant excluded from the asset union still scores, at the baseline — so
+                    // the reason belongs on its ENTRY rather than in `omitted`. Set here because
+                    // this is where the exclusion is decided; the scorer downstream only ever sees
+                    // a portfolio it could not value and would describe the symptom.
+                    const unknown = unpriceableAssets.get(entry.agent.toLowerCase());
+                    return unknown
+                        ? { ...entry, fault: `unpriceable-asset: ${unknown}` }
+                        : entry;
+                }),
                 resolved,
                 teeImageDigest: deps.teeImageDigest,
                 resolvedAtSecs: now,
+                omitted,
             });
         }
 
@@ -425,6 +468,7 @@ export function makeEngine(deps: EngineDeps): Engine {
             window,
             teeImageDigest: deps.teeImageDigest,
             resolvedAtSecs: now,
+            omitted,
         });
     }
 

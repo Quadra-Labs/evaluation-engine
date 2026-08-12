@@ -125,6 +125,7 @@ export interface ChainReader {
     getCompetition(competitionId: Hex): Promise<Competition>;
     getCompetitionCreatedBlock(competitionId: Hex): Promise<bigint | undefined>;
     getSubmissions(competitionId: Hex, fromBlock: bigint): Promise<Submission[]>;
+    getJoiners(competitionId: Hex, fromBlock: bigint): Promise<Address[]>;
     hasJoined(competitionId: Hex, agent: Address): Promise<boolean>;
 }
 
@@ -356,6 +357,48 @@ export function makeChainReader(config: ReaderConfig): ChainReader {
             for (const [agent, { hash, txHash }] of latest) {
                 const ciphertext = await ciphertextFromTx(txHash, sealedCompetitionAbi as Abi);
                 out.push({ agent, ciphertext, ciphertextHash: hash, txHash });
+            }
+            return out;
+        },
+
+        /**
+         * Every agent that staked in, whether or not it went on to submit.
+         *
+         * The difference from `getSubmissions` is the whole point: a staker that never submitted
+         * cannot be named in the settlement — `_recordEntries` reverts `NoSubmission` — so without
+         * this scan it forfeits a stake and leaves no trace in the receipt, the Passport, or
+         * anywhere else an outsider can read. Same floor rule as `getSubmissions`: the
+         * competition's own creation block, so a caller cannot narrow the window to hide someone.
+         */
+        async getJoiners(competitionId, fromBlock) {
+            const toBlock = await latestBlock();
+            const logs = await getLogsChunked({
+                client,
+                fromBlock,
+                toBlock,
+                fetch: (from, to) =>
+                    client.getContractEvents({
+                        address: config.sealedCompetition,
+                        abi: sealedCompetitionAbi,
+                        eventName: 'Joined',
+                        args: { competitionId },
+                        fromBlock: from,
+                        toBlock: to,
+                    }),
+            });
+
+            // `join` reverts `AlreadyJoined`, so a duplicate should be impossible — deduped anyway
+            // because this feeds a hash preimage, and a repeated address would be a repeated line
+            // in a receipt everyone must reproduce byte for byte.
+            const seen = new Set<string>();
+            const out: Address[] = [];
+            for (const entry of logs) {
+                const agent = entry.args.agent;
+                if (!agent) continue;
+                const key = agent.toLowerCase();
+                if (seen.has(key)) continue;
+                seen.add(key);
+                out.push(agent);
             }
             return out;
         },
